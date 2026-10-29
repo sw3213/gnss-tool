@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 void main() => runApp(const GnssApp());
@@ -531,7 +532,7 @@ class SkyPainter extends CustomPainter {
       final rr = r * (90 - s.elev!) / 90;
       final p = c + Offset(sin(rad), -cos(rad)) * rr;
       final snr = (s.snr ?? 0).toDouble();
-      final radius = 5 + (snr / 50).clamp(0.0, 1.0) * 8;
+      final radius = 5 + (snr / 50).clamp(0.0, 1.0).toDouble() * 8;
       final color = sysColor(s.sys);
       final paint = Paint()
         ..color = color
