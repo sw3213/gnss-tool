@@ -473,22 +473,37 @@ class _HomePageState extends State<HomePage> {
   PhoneGnss? _phone;
   Timer? _sampler;
   double? _pressure, _temp, _humidity; // 출처가 보낸 최신 센서 값
+  late final AppLifecycleListener _lifecycle;
   int tab = 0;
 
   @override
   void initState() {
     super.initState();
-    _start();
-    // 센서 차트는 출처와 무관하게 1초마다 최신 값을 한 점씩 기록
-    _sampler = Timer.periodic(const Duration(seconds: 1), (_) => _sample());
+    _resume();
+    // 배터리: 앱이 화면에서 사라지면(홈 버튼, 다른 앱) GPS·센서를 끄고, 돌아오면 다시 켬.
+    // 권한 요청 창처럼 위에 잠깐 덮이는 경우(inactive)는 해당 안 됨
+    _lifecycle = AppLifecycleListener(onHide: _pause, onShow: _resume);
     WidgetsBinding.instance.addPostFrameCallback((_) => checkForUpdate(context));
   }
 
   @override
   void dispose() {
+    _lifecycle.dispose();
+    _pause();
+    super.dispose();
+  }
+
+  void _resume() {
+    if (_sampler != null) return;
+    _start();
+    // 센서 차트는 출처와 무관하게 1초마다 최신 값을 한 점씩 기록
+    _sampler = Timer.periodic(const Duration(seconds: 1), (_) => _sample());
+  }
+
+  void _pause() {
     _stop();
     _sampler?.cancel();
-    super.dispose();
+    _sampler = null;
   }
 
   void _onLine(String line) {
