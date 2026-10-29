@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.app.ApplicationExitInfo
+import android.app.DownloadManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.Sensor
@@ -14,6 +15,7 @@ import android.location.GnssStatus
 import android.location.LocationListener
 import android.location.LocationManager
 import android.location.OnNmeaMessageListener
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -93,6 +95,46 @@ class MainActivity : FlutterActivity() {
         MethodChannel(messenger, "gnss_tool/diag").setMethodCallHandler { call, result ->
             if (call.method == "lastCrash") result.success(runCatching { lastCrash() }.getOrNull())
             else result.notImplemented()
+        }
+
+        // 지도 다운로드는 안드로이드 다운로드 관리자에 맡김: 앱을 닫아도 계속 받고, 끊기면 알아서 이어받고,
+        // 알림창에 진행률 표시. 저장 위치는 앱 전용 외부 저장소(권한 불필요, 앱 삭제 시 함께 삭제)
+        MethodChannel(messenger, "gnss_tool/download").setMethodCallHandler { call, result ->
+            val dm = getSystemService(DownloadManager::class.java)
+            when (call.method) {
+                "start" -> {
+                    val wifiOnly = call.argument<Boolean>("wifiOnly") ?: true
+                    val req = DownloadManager.Request(Uri.parse(call.argument<String>("url")))
+                        .setTitle(call.argument<String>("title"))
+                        .setDescription("GNSS Tool 오프라인 지도")
+                        .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                        .setDestinationInExternalFilesDir(this, "maps", call.argument<String>("file"))
+                        .setAllowedOverMetered(!wifiOnly) // false = 와이파이 같은 무제한 네트워크에서만
+                        .setAllowedOverRoaming(false)
+                    result.success(dm.enqueue(req))
+                }
+                "query" -> {
+                    val id = call.argument<Number>("id")!!.toLong()
+                    dm.query(DownloadManager.Query().setFilterById(id)).use { c ->
+                        if (!c.moveToFirst()) {
+                            result.success(null)
+                        } else {
+                            fun col(name: String) = c.getColumnIndexOrThrow(name)
+                            result.success(
+                                mapOf(
+                                    "status" to c.getInt(col(DownloadManager.COLUMN_STATUS)),
+                                    "reason" to c.getInt(col(DownloadManager.COLUMN_REASON)),
+                                    "done" to c.getLong(col(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)),
+                                    "total" to c.getLong(col(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)),
+                                    "uri" to c.getString(col(DownloadManager.COLUMN_LOCAL_URI)),
+                                )
+                            )
+                        }
+                    }
+                }
+                "remove" -> result.success(dm.remove(call.argument<Number>("id")!!.toLong()))
+                else -> result.notImplemented()
+            }
         }
 
         EventChannel(messenger, "gnss_tool/gnss").setStreamHandler(object : EventChannel.StreamHandler {
