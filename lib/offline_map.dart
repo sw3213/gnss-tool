@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -79,43 +80,63 @@ class MapStore {
     return [for (final j in list) MapPack.fromJson(j as Map<String, dynamic>)];
   }
 
-  /// 임시 파일(.part)에 받은 뒤 끝나면 이름을 바꿈 -> 중간에 끊겨도 깨진 지도가 남지 않음
+  static const _maxAttempts = 30;
+
+  /// 받은 만큼 남아 있는 임시 파일 크기 (이어받기 가능 여부 표시용)
+  Future<int> partialBytes(String id) async {
+    final f = File('${await pathOf(id)}.part');
+    return f.existsSync() ? f.lengthSync() : 0;
+  }
+
+  /// 임시 파일(.part)에 이어받기(HTTP Range)로 받고, 다 받으면 이름을 바꿈.
+  /// 수백 MB라 와이파이 흔들림·서버 연결 끊김이 흔함 -> 끊기면 받은 데까지 두고 자동 재시도.
+  /// 다운로드 링크(GitHub -> 서명된 저장소 주소)는 약 1시간 뒤 만료되므로 시도마다 새로 받음
   Future<void> download(MapPack p) async {
     final path = await pathOf(p.id);
     final part = File('$path.part');
     _cancel.remove(p.id);
-    progress.value = {...progress.value, p.id: 0};
     final client = http.Client();
+    var have = part.existsSync() ? part.lengthSync() : 0;
+    if (have > p.size) {
+      part.deleteSync(); // 카탈로그가 바뀌어 예전 조각이 더 큼 -> 처음부터
+      have = 0;
+    }
+    progress.value = {...progress.value, p.id: have / p.size};
     try {
-      final res = await client.send(http.Request('GET', Uri.parse(p.url)));
-      if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
-      final total = res.contentLength ?? p.size;
-      final sink = part.openWrite();
-      var got = 0, lastPct = -1;
-      try {
-        await for (final chunk in res.stream) {
-          if (_cancel.contains(p.id)) throw const _Cancelled();
-          sink.add(chunk);
-          got += chunk.length;
-          final pct = (got * 100 / total).floor();
-          if (pct != lastPct) {
-            lastPct = pct;
-            progress.value = {...progress.value, p.id: got / total};
-          }
+      for (int attempt = 1; have < p.size; attempt++) {
+        if (_cancel.contains(p.id)) throw const _Cancelled();
+        try {
+          have = await _fetchFrom(client, p, part, have);
+        } on _Cancelled {
+          rethrow;
+        } catch (_) {
+          have = part.existsSync() ? part.lengthSync() : 0;
+          if (attempt >= _maxAttempts) throw const _Interrupted();
+          await Future<void>.delayed(Duration(seconds: min(2 * attempt, 30)));
         }
-      } finally {
-        await sink.close();
       }
+      if (part.lengthSync() != p.size) throw Exception('크기가 맞지 않음 (${part.lengthSync()} / ${p.size})');
       await part.rename(path);
       await File('${(await _maps()).path}/${p.id}.json').writeAsString(jsonEncode(p.toJson()));
       await load();
-    } catch (e) {
+    } on _Cancelled {
       if (part.existsSync()) part.deleteSync();
-      if (e is! _Cancelled) rethrow;
     } finally {
       client.close();
       progress.value = {...progress.value}..remove(p.id);
     }
+  }
+
+  Future<int> _fetchFrom(http.Client client, MapPack p, File part, int from) {
+    var lastPct = -1;
+    return fetchRange(client, Uri.parse(p.url), part, from, onBytes: (got) {
+      if (_cancel.contains(p.id)) throw const _Cancelled();
+      final pct = (got * 100 / p.size).floor();
+      if (pct != lastPct) {
+        lastPct = pct;
+        progress.value = {...progress.value, p.id: got / p.size};
+      }
+    });
   }
 
   void cancel(String id) => _cancel.add(id);
@@ -130,8 +151,52 @@ class MapStore {
   }
 }
 
+/// [url]을 [from] 바이트부터 [part]에 이어서 받고, 끝난(또는 끊긴) 시점의 파일 크기를 반환.
+/// [onBytes]는 지금까지 받은 총 바이트로 호출되며, 예외를 던지면 중단됨
+Future<int> fetchRange(http.Client client, Uri url, File part, int from,
+    {void Function(int got)? onBytes}) async {
+  // GitHub 주소는 302로 서명된 주소를 줌. 직접 따라가야 Range 헤더가 확실히 전달됨
+  final head = http.Request('GET', url)..followRedirects = false;
+  final redirect = await client.send(head).timeout(const Duration(seconds: 20));
+  await redirect.stream.drain<void>();
+  final target = redirect.isRedirect ? Uri.parse(redirect.headers['location']!) : url;
+
+  final req = http.Request('GET', target);
+  if (from > 0) req.headers['Range'] = 'bytes=$from-';
+  final res = await client.send(req).timeout(const Duration(seconds: 20));
+  var got = from;
+  final IOSink sink;
+  if (res.statusCode == 206) {
+    sink = part.openWrite(mode: FileMode.append);
+  } else if (res.statusCode == 200) {
+    sink = part.openWrite(); // 서버가 이어받기를 무시 -> 처음부터
+    got = 0;
+  } else {
+    await res.stream.drain<void>();
+    throw Exception('HTTP ${res.statusCode}');
+  }
+  try {
+    // 30초 동안 데이터가 안 오면 끊긴 것으로 보고 재시도
+    await for (final chunk in res.stream.timeout(const Duration(seconds: 30))) {
+      sink.add(chunk);
+      got += chunk.length;
+      onBytes?.call(got);
+    }
+  } finally {
+    await sink.flush();
+    await sink.close();
+  }
+  return part.lengthSync();
+}
+
 class _Cancelled implements Exception {
   const _Cancelled();
+}
+
+class _Interrupted implements Exception {
+  const _Interrupted();
+  @override
+  String toString() => '네트워크가 계속 끊겨 다운로드를 멈췄습니다. 받은 부분은 남아 있으니 다시 누르면 이어서 받습니다.';
 }
 
 // ---------------- 지도 스타일 (Protomaps v4 스키마, 어두운 테마) ----------------
@@ -475,6 +540,7 @@ class MapDownloadPage extends StatefulWidget {
 class _MapDownloadPageState extends State<MapDownloadPage> {
   final store = MapStore.instance;
   List<MapPack>? _catalog;
+  Map<String, int> _partial = {}; // id -> 받다 멈춘 바이트 수
   String? _error;
 
   @override
@@ -488,21 +554,30 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
     try {
       final c = await store.fetchCatalog();
       if (mounted) setState(() => _catalog = c);
+      await _refreshPartial();
     } catch (e) {
       if (mounted) setState(() => _error = '목록을 불러오지 못했습니다 (인터넷 연결 확인)');
     }
   }
 
+  Future<void> _refreshPartial() async {
+    final m = {for (final p in _catalog ?? <MapPack>[]) p.id: await store.partialBytes(p.id)};
+    if (mounted) setState(() => _partial = m);
+  }
+
   Future<void> _download(MapPack p) async {
+    final left = p.size - (_partial[p.id] ?? 0);
+    final resume = left < p.size;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('${p.name} 지도'),
-        content: Text('${formatBytes(p.size)}를 내려받습니다. 데이터 요금이 들 수 있으니 Wi-Fi를 권장합니다.\n\n'
-            '지도 날짜: ${p.date}'),
+        content: Text('${resume ? '남은 ' : ''}${formatBytes(left)}를 내려받습니다. '
+            '데이터 요금이 들 수 있으니 Wi-Fi를 권장합니다.\n\n'
+            '연결이 끊겨도 받은 부분부터 자동으로 이어받습니다.\n지도 날짜: ${p.date}'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('다운로드')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(resume ? '이어받기' : '다운로드')),
         ],
       ),
     );
@@ -511,8 +586,15 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
       await store.download(p);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('다운로드 실패: $e')));
+        final msg = e is _Interrupted
+            ? '$e'
+            : e is http.ClientException || e is SocketException || e is TimeoutException
+                ? '네트워크 오류로 다운로드가 멈췄습니다. 다시 누르면 이어서 받습니다.'
+                : '다운로드 실패: $e';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
       }
+    } finally {
+      await _refreshPartial();
     }
   }
 
@@ -578,6 +660,10 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
     if (pr != null) {
       sub = '다운로드 중... ${(pr * 100).floor()}%  (${formatBytes((p.size * pr).round())} / ${formatBytes(p.size)})';
       trailing = IconButton(icon: const Icon(Icons.close), tooltip: '취소', onPressed: () => store.cancel(p.id));
+    } else if (mine == null && (_partial[p.id] ?? 0) > 0) {
+      final pct = (_partial[p.id]! * 100 / p.size).floor();
+      sub = '받다 멈춤 $pct%  (${formatBytes(_partial[p.id]!)} / ${formatBytes(p.size)})';
+      trailing = IconButton(icon: const Icon(Icons.play_arrow), tooltip: '이어받기', onPressed: () => _download(p));
     } else if (mine == null) {
       sub = '${formatBytes(p.size)}  ·  ${p.date}';
       trailing = IconButton(icon: const Icon(Icons.download), tooltip: '다운로드', onPressed: () => _download(p));
