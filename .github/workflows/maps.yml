@@ -43,9 +43,12 @@ jobs:
         env:
           BUILD: ${{ steps.build.outputs.date }}
           REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p out
-          echo '[]' > out/catalog.json
+          # 지형(kind=terrain) 항목은 terrain.yml이 관리하므로 기존 카탈로그에서 그대로 유지
+          gh release download maps -p catalog.json -O old.json 2>/dev/null || echo '[]' > old.json
+          jq '[.[] | select(.kind == "terrain")]' old.json > out/catalog.json
           jq -c '.[]' maps/regions.json | while read -r row; do
             id=$(echo "$row" | jq -r .id)
             bbox=$(echo "$row" | jq -r '.bbox | join(",")')
@@ -55,7 +58,7 @@ jobs:
             date="${BUILD:0:4}-${BUILD:4:2}-${BUILD:6:2}"
             url="https://github.com/$REPO/releases/download/maps/$id.pmtiles"
             jq --argjson r "$row" --arg url "$url" --arg date "$date" --argjson size "$size" \
-              '. + [$r + {url: $url, date: $date, size: $size, maxzoom: 15}]' \
+              '. + [$r + {kind: "basemap", url: $url, date: $date, size: $size, maxzoom: 15}]' \
               out/catalog.json > out/tmp.json && mv out/tmp.json out/catalog.json
           done
           cat out/catalog.json

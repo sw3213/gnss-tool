@@ -1,0 +1,83 @@
+name: Build terrain package
+
+# 한국 지형(Copernicus DEM 30 m)으로 등고선과 고도 색칠 구역을 만들어 벡터 지도(.pmtiles)로 묶고
+# Release "maps"에 올린다. 앱은 catalog.json의 kind="terrain" 항목을 기본 지도 위에 겹쳐 그림.
+#   contour: 등고선 (z10-11: 100 m 간격, z12-13: 20 m 간격), 속성 ele
+#   bands:   고도 구역 다각형 (90 m로 줄인 DEM), 속성 amin = 구역 아래 경계 고도
+# DEM: Copernicus GLO-30 © DLR e.V. 2010-2014, © Airbus Defence and Space GmbH 2014-2018,
+#      provided under COPERNICUS by the European Union and ESA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  terrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GDAL and tippecanoe
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gdal-bin libsqlite3-dev zlib1g-dev jq
+          git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
+          make -C /tmp/tippecanoe -j"$(nproc)" >/dev/null
+          sudo make -C /tmp/tippecanoe install >/dev/null
+          gdalinfo --version
+          tippecanoe --version
+
+      - name: Download Copernicus DEM tiles (Korea)
+        run: |
+          mkdir -p dem
+          for lat in 33 34 35 36 37 38; do
+            for lon in 124 125 126 127 128 129 130 131; do
+              n="Copernicus_DSM_COG_10_N${lat}_00_E${lon}_00_DEM"
+              # 바다만 있는 칸은 파일이 없음 (404) -> 건너뜀
+              curl -sf -o "dem/$n.tif" "https://copernicus-dem-30m.s3.amazonaws.com/$n/$n.tif" || rm -f "dem/$n.tif"
+            done
+          done
+          ls dem | wc -l
+          du -sh dem
+          gdalbuildvrt -q dem.vrt dem/*.tif
+
+      - name: Contours and elevation bands
+        run: |
+          gdal_contour -q -a ele -i 100 -f GeoJSONSeq dem.vrt c100.geojsons
+          gdal_contour -q -a ele -i 20 -f GeoJSONSeq dem.vrt c20.geojsons
+          gdalwarp -q -tr 0.00083333 0.00083333 -r average dem.vrt dem90.tif
+          gdal_contour -q -p -amin amin -amax amax \
+            -fl 0 100 200 300 400 500 600 700 800 900 1000 1200 1400 1600 1800 2000 \
+            -f GeoJSONSeq dem90.tif bands.geojsons
+          ls -la *.geojsons
+          df -h .
+
+      - name: Vector tiles
+        run: |
+          tippecanoe -q -f -o c100.pmtiles -l contour -Z10 -z11 -y ele --drop-densest-as-needed c100.geojsons
+          tippecanoe -q -f -o c20.pmtiles -l contour -Z12 -z13 -y ele --drop-densest-as-needed c20.geojsons
+          tippecanoe -q -f -o bands.pmtiles -l bands -Z5 -z13 -y amin \
+            --coalesce-densest-as-needed --detect-shared-borders --simplification=4 bands.geojsons
+          tile-join -q -f --no-tile-size-limit -o kr-terrain.pmtiles c100.pmtiles c20.pmtiles bands.pmtiles
+          ls -la *.pmtiles
+
+      - name: Publish to release "maps"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          size=$(stat -c %s kr-terrain.pmtiles)
+          date=$(date -u +%Y-%m-%d)
+          gh release download maps -p catalog.json -O old.json 2>/dev/null || echo '[]' > old.json
+          # 기존 카탈로그에서 지형 항목만 바꿔 끼움 (기본 지도 항목은 maps.yml이 관리)
+          jq --arg url "https://github.com/$REPO/releases/download/maps/kr-terrain.pmtiles" \
+             --arg date "$date" --argjson size "$size" \
+             '[.[] | select(.kind != "terrain")] + [{
+                id: "kr-terrain", name: "대한민국 지형 (등고선)", kind: "terrain",
+                bbox: [124.5, 33.0, 132.0, 38.7], url: $url, date: $date, size: $size, maxzoom: 13
+              }]' old.json > catalog.json
+          cat catalog.json
+          gh release upload maps kr-terrain.pmtiles catalog.json --clobber
