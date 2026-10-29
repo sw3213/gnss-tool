@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21' # maplibre_gl이 Java 21로 컴파일됨 (Android Studio 내장 JDK와 같음)
 
       - uses: subosito/flutter-action@v2
         with:
