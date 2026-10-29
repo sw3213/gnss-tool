@@ -3,9 +3,12 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import 'dop.dart';
 import 'phone_gnss.dart';
 import 'updater.dart';
+import 'weather.dart';
 
 void main() => runApp(const GnssApp());
 
@@ -40,9 +43,11 @@ class GnssSnapshot {
   final List<Sat> sats;
   final double? pdop, hdop, vdop, lat, lon, alt;
   final double? hAcc, vAcc; // 수신기가 추정한 오차 (m, 폰 GPS만 제공)
+  final Dop? geoDop; // 사용 위성 배치로 직접 계산한 DOP (수신기 보고값 검증용)
   final int fixQ, ggaSats, dropped, badChecksum;
   const GnssSnapshot({
     this.sats = const [],
+    this.geoDop,
     this.pdop,
     this.hdop,
     this.vdop,
@@ -64,14 +69,11 @@ class SensorSample {
   final double? pressure; // hPa (BMP280 / 폰 기압계)
   final double? temp; // °C (AHT20)
   final double? humidity; // %RH (AHT20)
-  final double? gnssAlt; // m, 같은 시각 GGA 고도
-  const SensorSample(this.t, this.pressure, this.temp, this.humidity, this.gnssAlt);
-
-  // 표준대기(1013.25 hPa) 기준 기압 고도. 해면기압 보정은 폭풍 경보 단계에서
-  double? get baroAlt {
-    final p = pressure;
-    return p == null ? null : 44330 * (1 - pow(p / 1013.25, 1 / 5.255).toDouble());
-  }
+  final double? gnssAlt; // m, 같은 시각 GGA 고도 (측위 중일 때만)
+  final double? qnh; // 해면기압 (BaroAltFilter)
+  final double? baroAlt; // 기압 + GNSS 보정 고도 (BaroAltFilter)
+  const SensorSample(this.t, this.pressure, this.temp, this.humidity, this.gnssAlt,
+      {this.qnh, this.baroAlt});
 }
 
 const sensorWindow = 300; // 최근 5분 (1초 간격)
@@ -294,6 +296,7 @@ class NmeaParser {
     }
     notifier.value = GnssSnapshot(
       sats: sats,
+      geoDop: dopFromSats(sats),
       hAcc: hAcc,
       vAcc: vAcc,
       pdop: pdop,
@@ -467,6 +470,12 @@ class _HomePageState extends State<HomePage> {
   final log = ValueNotifier<List<String>>([]);
   final sensors = ValueNotifier<List<SensorSample>>([]);
   final notice = ValueNotifier<String?>(null); // 권한 거부, GPS 꺼짐 등 안내
+  final alert = ValueNotifier<String?>(null); // 폭풍 경보
+  final weather = ValueNotifier<StormStatus>(const StormStatus());
+  final qnhHistory = ValueNotifier<List<(DateTime, double)>>([]);
+  final baro = BaroAltFilter();
+  final storm = StormWatch();
+  StormLevel _alerted = StormLevel.none;
   final _buf = <String>[];
   DataSource source = isAndroid ? DataSource.phone : DataSource.sim;
   GnssSimulator? _sim;
@@ -504,6 +513,7 @@ class _HomePageState extends State<HomePage> {
     _stop();
     _sampler?.cancel();
     _sampler = null;
+    baro.reset(); // 앱을 내린 사이 이동했을 수 있으므로 고도는 다시 잡음 (기압 추세 기록은 유지)
   }
 
   void _onLine(String line) {
@@ -514,12 +524,36 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _sample() {
+    final now = DateTime.now();
+    final snap = parser.notifier.value;
+    final gnssAlt = snap.fixQ > 0 ? snap.alt : null;
+    final p = _pressure;
+    if (p != null) {
+      baro.update(p, gnssAlt);
+      final q = baro.qnh;
+      if (q != null) _onWeather(storm.add(now, q));
+    }
     final next = [
       ...sensors.value,
-      SensorSample(DateTime.now(), _pressure, _temp, _humidity, parser.notifier.value.alt),
+      SensorSample(now, p, _temp, _humidity, gnssAlt,
+          qnh: p == null ? null : baro.qnh, baroAlt: p == null ? null : baro.alt),
     ];
     if (next.length > sensorWindow) next.removeRange(0, next.length - sensorWindow);
     sensors.value = next;
+  }
+
+  void _onWeather(StormStatus st) {
+    weather.value = st;
+    qnhHistory.value = st.history;
+    // 경보 단계가 올라갈 때만 한 번 알림. 정상으로 돌아오면 다음 악화 때 다시 알림
+    if (st.level.index > _alerted.index) {
+      alert.value = st.level == StormLevel.storm ? '폭풍 경보 — ${st.text}' : '날씨 악화 주의 — ${st.text}';
+      for (int i = 0; i < 3; i++) {
+        Future.delayed(Duration(milliseconds: 400 * i), HapticFeedback.heavyImpact);
+      }
+    }
+    if (st.level == StormLevel.none) alert.value = null;
+    _alerted = st.level;
   }
 
   void _start() {
@@ -570,6 +604,12 @@ class _HomePageState extends State<HomePage> {
     _buf.clear();
     log.value = [];
     sensors.value = [];
+    baro.reset();
+    storm.clear(); // 시뮬레이션과 실제 기압이 섞이지 않게
+    weather.value = const StormStatus();
+    qnhHistory.value = [];
+    alert.value = null;
+    _alerted = StormLevel.none;
     setState(() => source = s);
     _start();
   }
@@ -579,7 +619,7 @@ class _HomePageState extends State<HomePage> {
     final pages = <Widget>[
       SkyPage(snap: parser.notifier),
       QualityPage(snap: parser.notifier),
-      SensorPage(data: sensors),
+      SensorPage(data: sensors, weather: weather, qnhHistory: qnhHistory),
       LogPage(log: log),
     ];
     return Scaffold(
@@ -608,6 +648,22 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       body: Column(children: [
+        ValueListenableBuilder<String?>(
+          valueListenable: alert,
+          builder: (_, msg, __) => msg == null
+              ? const SizedBox.shrink()
+              : Container(
+                  width: double.infinity,
+                  color: Colors.red.shade900,
+                  padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+                  child: Row(children: [
+                    const Icon(Icons.thunderstorm, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(msg, style: const TextStyle(fontSize: 14))),
+                    TextButton(onPressed: () => alert.value = null, child: const Text('확인')),
+                  ]),
+                ),
+        ),
         ValueListenableBuilder<String?>(
           valueListenable: notice,
           builder: (_, msg, __) => msg == null
@@ -661,7 +717,8 @@ class SkyPage extends StatelessWidget {
           builder: (_, s, __) {
             final used = s.sats.where((x) => x.used).length;
             return Text(
-              '관측 ${s.sats.length}개  /  사용 $used개   |   HDOP ${fmt(s.hdop)} (${hdopGrade(s.hdop)})',
+              '관측 ${s.sats.length}개  /  사용 $used개   |   '
+              'HDOP ${fmt(s.geoDop?.hdop ?? s.hdop)} (${hdopGrade(s.geoDop?.hdop ?? s.hdop)})',
               textAlign: TextAlign.center,
               style: const TextStyle(fontSize: 15),
             );
@@ -763,10 +820,14 @@ class QualityPage extends StatelessWidget {
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text('오차 등급: ${hdopGrade(s.hdop)}',
+                  Text('오차 등급: ${hdopGrade(s.geoDop?.hdop ?? s.hdop)}',
                       style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 6),
-                  Text('HDOP ${fmt(s.hdop)}   VDOP ${fmt(s.vdop)}   PDOP ${fmt(s.pdop)}'),
+                  if (s.geoDop != null)
+                    Text('HDOP ${fmt(s.geoDop!.hdop)}   VDOP ${fmt(s.geoDop!.vdop)}   '
+                        'PDOP ${fmt(s.geoDop!.pdop)}  (위성 배치로 계산)'),
+                  Text('HDOP ${fmt(s.hdop)}   VDOP ${fmt(s.vdop)}   PDOP ${fmt(s.pdop)}  (수신기 보고)',
+                      style: s.geoDop == null ? null : const TextStyle(color: Colors.white54)),
                   Text('위치 ${fmt(s.lat, 5)}, ${fmt(s.lon, 5)}   고도 ${fmt(s.alt)} m'),
                   if (s.hAcc != null)
                     Text('예상 오차 (수신기 추정): 수평 ±${fmt(s.hAcc)} m   수직 ±${fmt(s.vAcc)} m'),
@@ -830,7 +891,53 @@ class QualityPage extends StatelessWidget {
 
 class SensorPage extends StatelessWidget {
   final ValueListenable<List<SensorSample>> data;
-  const SensorPage({super.key, required this.data});
+  final ValueListenable<StormStatus> weather;
+  final ValueListenable<List<(DateTime, double)>> qnhHistory;
+  const SensorPage({super.key, required this.data, required this.weather, required this.qnhHistory});
+
+  Widget _weatherCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          ValueListenableBuilder<StormStatus>(
+            valueListenable: weather,
+            builder: (_, w, __) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('해면기압  ${fmt(w.qnh)} hPa',
+                  style: const TextStyle(fontSize: 18, color: Colors.lightBlueAccent)),
+              const SizedBox(height: 2),
+              Text(w.text,
+                  style: TextStyle(
+                    fontSize: 15,
+                    color: switch (w.level) {
+                      StormLevel.storm => Colors.redAccent,
+                      StormLevel.warning => Colors.orangeAccent,
+                      StormLevel.none => Colors.white70,
+                    },
+                  )),
+            ]),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 110,
+            child: RepaintBoundary(
+              child: CustomPaint(
+                painter: LineChartPainter<(DateTime, double)>(
+                    qnhHistory, (e) => e.$2, Colors.lightBlueAccent, 1, 2,
+                    window: 180),
+                size: Size.infinite,
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+              '최근 3시간, 1분 평균. 현지기압을 보정 고도로 해수면 기준 환산 → 일기예보 기압과 비교 가능\n'
+              '경보: 3시간 3.6 hPa↓ 주의, 6 hPa↓ 폭풍 / 5분 3 hPa↓ 급하강',
+              style: TextStyle(color: Colors.white54, fontSize: 12)),
+        ]),
+      ),
+    );
+  }
 
   Widget _chart(String title, String unit, int digits, double minSpan, Color color,
       double? Function(SensorSample) value,
@@ -870,11 +977,13 @@ class SensorPage extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
-        _chart('기압', 'hPa', 1, 2, Colors.lightBlueAccent, (s) => s.pressure),
+        _weatherCard(),
+        _chart('현지기압', 'hPa', 1, 2, Colors.lightBlueAccent, (s) => s.pressure),
         _chart('온도', '°C', 1, 2, Colors.orangeAccent, (s) => s.temp),
         _chart('습도', '%', 0, 5, Colors.tealAccent, (s) => s.humidity),
-        _chart('기압 고도', 'm', 1, 5, Colors.amberAccent, (s) => s.baroAlt,
-            second: (s) => s.gnssAlt, legend: '노란 선 = 기압 고도 / 회색 선 = GNSS 고도'),
+        _chart('보정 고도', 'm', 1, 5, Colors.amberAccent, (s) => s.baroAlt,
+            second: (s) => s.gnssAlt,
+            legend: '노란 선 = 기압+GNSS 보정 고도 / 회색 선 = GNSS 고도 (측위 중일 때)'),
         const Text('최근 5분, 1초 간격',
             textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
         ValueListenableBuilder<List<SensorSample>>(
@@ -901,14 +1010,16 @@ class SensorPage extends StatelessWidget {
   }
 }
 
-class LineChartPainter extends CustomPainter {
-  final ValueListenable<List<SensorSample>> data;
-  final double? Function(SensorSample) value;
-  final double? Function(SensorSample)? second;
+class LineChartPainter<T> extends CustomPainter {
+  final ValueListenable<List<T>> data;
+  final double? Function(T) value;
+  final double? Function(T)? second;
   final Color color;
   final int digits;
   final double minSpan; // 잡음이 과장되지 않도록 세로축 최소 범위
-  LineChartPainter(this.data, this.value, this.color, this.digits, this.minSpan, {this.second})
+  final int window; // 가로축에 들어가는 점 개수
+  LineChartPainter(this.data, this.value, this.color, this.digits, this.minSpan,
+      {this.second, this.window = sensorWindow})
       : super(repaint: data);
 
   void _text(Canvas c, String s, Offset at) {
@@ -946,13 +1057,13 @@ class LineChartPainter extends CustomPainter {
       hi = mid + minSpan / 2;
     }
 
-    // 최신 값이 오른쪽 끝, 창(5분)을 다 채우기 전에는 오른쪽부터 채워짐
-    Path? line(double? Function(SensorSample) f) {
+    // 최신 값이 오른쪽 끝, 창을 다 채우기 전에는 오른쪽부터 채워짐
+    Path? line(double? Function(T) f) {
       Path? p;
       for (int i = 0; i < list.length; i++) {
         final v = f(list[i]);
         if (v == null) continue;
-        final x = size.width * (i + sensorWindow - list.length) / (sensorWindow - 1);
+        final x = size.width * (i + window - list.length) / (window - 1);
         final y = size.height * (hi - v) / (hi - lo);
         p = p == null ? (Path()..moveTo(x, y)) : (p..lineTo(x, y));
       }
@@ -974,7 +1085,7 @@ class LineChartPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant LineChartPainter old) => old.data != data;
+  bool shouldRepaint(covariant LineChartPainter<T> old) => old.data != data;
 }
 
 // ---------------- 원시 로그 ----------------
