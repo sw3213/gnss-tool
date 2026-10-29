@@ -36,6 +36,23 @@ void main() {
     expect(jsonEncode(pois['filter']), contains('["-",["get","min_zoom"],2]'));
   });
 
+  test('terrain layers sit under water and roads, labels on top', () async {
+    const base = MapPack('kr', '대한민국', 'u', '2026-10-29', [124.5, 33, 132, 38.7], 1);
+    const terrain = MapPack('kr-terrain', '지형', 'u', '2026-10-30', [124.5, 33, 132, 38.7], 1, kind: 'terrain');
+    final style = jsonDecode(await buildStyle([base, terrain])) as Map<String, dynamic>;
+    final ids = [for (final l in style['layers'] as List) (l as Map)['id'] as String];
+    int at(String id) => ids.indexOf(id);
+    expect(at('t_kr-terrain-bands'), lessThan(at('m_kr-water')));
+    expect(at('t_kr-terrain-contour'), greaterThan(at('m_kr-water')));
+    expect(at('t_kr-terrain-contour'), lessThan(at('m_kr-roads_minor')));
+    expect(at('t_kr-terrain-contour-label'), greaterThan(at('m_kr-roads_highway')));
+    expect((style['sources'] as Map).containsKey('t_kr-terrain'), isTrue);
+
+    // 지형만 있어도 그려짐
+    final only = jsonDecode(await buildStyle([terrain])) as Map<String, dynamic>;
+    expect([for (final l in only['layers'] as List) (l as Map)['id']], contains('t_kr-terrain-contour'));
+  });
+
   test('scale bar picks a round length that fits', () {
     // 원주(위도 37.3), 확대 15: dp당 약 1.9 m -> 100 dp 안에 100 m
     final mpp = ScaleBar.metersPerDp(37.3, 15);

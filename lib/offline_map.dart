@@ -24,7 +24,10 @@ class MapPack {
   final String id, name, url, date;
   final List<double> bbox; // [서, 남, 동, 북]
   final int size; // bytes
-  const MapPack(this.id, this.name, this.url, this.date, this.bbox, this.size);
+  final String kind; // basemap = 기본 지도, terrain = 등고선·고도 색칠 (기본 지도 위에 겹침)
+  const MapPack(this.id, this.name, this.url, this.date, this.bbox, this.size, {this.kind = 'basemap'});
+
+  bool get isTerrain => kind == 'terrain';
 
   factory MapPack.fromJson(Map<String, dynamic> j) => MapPack(
         j['id'] as String,
@@ -33,10 +36,11 @@ class MapPack {
         j['date'] as String,
         [for (final v in j['bbox'] as List) (v as num).toDouble()],
         (j['size'] as num).toInt(),
+        kind: j['kind'] as String? ?? 'basemap',
       );
 
   Map<String, dynamic> toJson() =>
-      {'id': id, 'name': name, 'url': url, 'date': date, 'bbox': bbox, 'size': size};
+      {'id': id, 'name': name, 'url': url, 'date': date, 'bbox': bbox, 'size': size, 'kind': kind};
 
   LatLng get center => LatLng((bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2);
 }
@@ -255,7 +259,21 @@ Future<String> buildStyle(List<MapPack> packs) async {
       if (l['source'] == null) l, // 배경
   ];
 
-  for (final p in packs) {
+  // 지형(등고선·고도 색칠) 레이어: 기본 지도 사이사이에 끼워 넣음
+  final terrain = [for (final p in packs) if (p.isTerrain) p];
+  for (final p in terrain) {
+    sources['t_${p.id}'] = {
+      'type': 'vector',
+      'url': 'pmtiles://file://${MapStore.instance.fileOf(p.id)}',
+      'attribution': '© Copernicus DEM (ESA)',
+    };
+  }
+  final bands = [for (final p in terrain) ..._bandLayers('t_${p.id}')];
+  final contours = [for (final p in terrain) ..._contourLayers('t_${p.id}')];
+  final contourLabels = [for (final p in terrain) ..._contourLabelLayers('t_${p.id}')];
+  var placed = false;
+
+  for (final p in packs.where((p) => !p.isTerrain)) {
     final s = 'm_${p.id}';
     sources[s] = {
       'type': 'vector',
@@ -264,11 +282,19 @@ Future<String> buildStyle(List<MapPack> packs) async {
     };
     for (final l in base) {
       if (l['source'] == null) continue;
+      if (!placed) {
+        // 고도 색칠은 물 아래(바다·호수가 덮도록), 등고선은 도로 아래, 등고선 숫자는 라벨층
+        if (l['id'] == 'water') layers.addAll(bands);
+        if (l['id'] == 'roads_tunnels_other_casing') layers.addAll(contours);
+        if (l['id'] == 'address_label') layers.addAll(contourLabels);
+      }
       // 라벨(번지) 바로 앞에 우리 레이어를 끼워 넣어 도로 위, 글자 아래에 그려지게 함
       if (l['id'] == 'address_label') layers.addAll(_extraLayers(s));
       layers.add(_tweak({...l, 'id': '$s-${l['id']}', 'source': s}, l['id'] as String));
     }
+    placed = true;
   }
+  if (!placed) layers.addAll([...bands, ...contours, ...contourLabels]); // 지형만 받은 경우
   layers.addAll(_meLayers);
 
   return jsonEncode({
@@ -280,6 +306,71 @@ Future<String> buildStyle(List<MapPack> packs) async {
     'layers': layers,
   });
 }
+
+// ---------------- 지형: 고도 색칠 + 등고선 (terrain.yml이 만든 bands / contour 레이어) ----------------
+
+/// 고도 구역 색: 낮은 곳 초록 -> 노랑 -> 주황 -> 갈색 (등산 지도의 고도 단채식)
+const _bandColor = [
+  'step', ['get', 'amin'], //
+  '#a9d18e', 100, '#bfdb92', 200, '#d4e297', 300, '#e6e69c', 400, '#efdf9a', 500, '#f1d18c', //
+  600, '#ebbf80', 800, '#e0a975', 1000, '#d3946e', 1200, '#c4836a', 1500, '#b37868', 1800, '#a37069',
+];
+
+List<Map<String, dynamic>> _bandLayers(String s) => [
+      {
+        'id': '$s-bands',
+        'type': 'fill',
+        'source': s,
+        'source-layer': 'bands',
+        'paint': {
+          'fill-color': _bandColor,
+          'fill-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0.75, 14, 0.55],
+          'fill-antialias': false, // 구역 경계에 실선이 보이지 않게
+        },
+      },
+    ];
+
+// 100 m마다 굵고 진한 주곡선, 20 m 간격은 가는 선
+const _isIndex = ['==', ['%', ['get', 'ele'], 100], 0];
+
+List<Map<String, dynamic>> _contourLayers(String s) => [
+      {
+        'id': '$s-contour',
+        'type': 'line',
+        'source': s,
+        'source-layer': 'contour',
+        'filter': ['>', ['get', 'ele'], 0],
+        'paint': {
+          'line-color': ['case', _isIndex, '#8a5a2e', '#a8794c'],
+          'line-opacity': ['case', _isIndex, 0.75, 0.45],
+          'line-width': [
+            'interpolate', ['linear'], ['zoom'], //
+            10, ['case', _isIndex, 0.6, 0.3],
+            14, ['case', _isIndex, 1.3, 0.6],
+            17, ['case', _isIndex, 2.0, 1.0],
+          ],
+        },
+      },
+    ];
+
+List<Map<String, dynamic>> _contourLabelLayers(String s) => [
+      {
+        'id': '$s-contour-label',
+        'type': 'symbol',
+        'source': s,
+        'source-layer': 'contour',
+        'minzoom': 13,
+        'filter': ['all', ['>', ['get', 'ele'], 0], _isIndex],
+        'layout': {
+          'symbol-placement': 'line',
+          'text-field': ['to-string', ['get', 'ele']],
+          'text-font': ['NotoSansRegular'],
+          'text-size': 10,
+          'symbol-spacing': 350,
+        },
+        'paint': {'text-color': '#7a4f28', 'text-halo-color': '#ffffff', 'text-halo-width': 1.2},
+      },
+    ];
 
 /// 기본 스타일은 꽤 확대해야 정보가 보임 -> MAPS.ME처럼 덜 확대해도 보이게 조정
 Map<String, dynamic> _tweak(Map<String, dynamic> l, String id) {
@@ -651,7 +742,9 @@ class _MapPageState extends State<MapPage> {
                 builder: (_, cam, __) => cam == null ? const SizedBox.shrink() : ScaleBar(camera: cam),
               ),
               const SizedBox(height: 4),
-              Text('© OpenStreetMap  ·  ${packs.map((p) => p.date).join(', ')}',
+              Text(
+                  '© OpenStreetMap${packs.any((p) => p.isTerrain) ? ' · © Copernicus DEM' : ''}'
+                  '  ·  ${packs.where((p) => !p.isTerrain).map((p) => p.date).join(', ')}',
                   style: const TextStyle(fontSize: 9, color: Colors.black54)),
             ]),
           ),
@@ -830,7 +923,7 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
               children: [
                 const Padding(
                   padding: EdgeInsets.fromLTRB(4, 0, 4, 8),
-                  child: Text('나라별 지도', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  child: Text('지도 · 지형', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
                 if (_error != null)
                   ListTile(
