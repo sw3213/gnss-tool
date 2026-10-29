@@ -60,6 +60,19 @@ class MapStore {
 
   Future<String> pathOf(String id) async => '${(await _maps()).path}/$id.pmtiles';
 
+  // 안전 모드: 지도가 화면에 떠 있는 동안 표시 파일을 둠. 앱이 죽으면 파일이 남아
+  // 다음 실행 때 지도를 바로 열지 않음 (켜자마자 다시 죽는 반복 방지)
+  Future<File> _openFlag() async => File('${(await _maps()).parent.path}/map_open.flag');
+  Future<bool> crashedWhileMapOpen() async => (await _openFlag()).existsSync();
+  Future<void> markMapOpen(bool open) async {
+    final f = await _openFlag();
+    if (open) {
+      f.writeAsStringSync(DateTime.now().toIso8601String());
+    } else if (f.existsSync()) {
+      f.deleteSync();
+    }
+  }
+
   Future<void> load() async {
     final d = await _maps();
     final list = <MapPack>[];
@@ -369,6 +382,8 @@ class _MapPageState extends State<MapPage> {
   List<String> _styleIds = [];
   bool _styleReady = false;
   bool _follow = true; // 내 위치 따라가기 (지도를 손으로 움직이면 해제)
+  bool? _safeMode; // null = 확인 중, true = 지난번 지도를 보다 앱이 죽음
+  bool _marked = false;
 
   @override
   void initState() {
@@ -376,12 +391,16 @@ class _MapPageState extends State<MapPage> {
     store.installed.addListener(_rebuildStyle);
     widget.snap.addListener(_onSnap);
     store.load();
+    store.crashedWhileMapOpen().then((c) {
+      if (mounted) setState(() => _safeMode = c);
+    });
   }
 
   @override
   void dispose() {
     store.installed.removeListener(_rebuildStyle);
     widget.snap.removeListener(_onSnap);
+    if (_marked) store.markMapOpen(false);
     super.dispose();
   }
 
@@ -433,7 +452,12 @@ class _MapPageState extends State<MapPage> {
       builder: (_, packs, __) {
         if (packs.isEmpty) return _empty();
         final style = _style;
-        if (style == null) return const Center(child: CircularProgressIndicator());
+        if (style == null || _safeMode == null) return const Center(child: CircularProgressIndicator());
+        if (_safeMode!) return _safe(packs);
+        if (!_marked) {
+          _marked = true;
+          store.markMapOpen(true);
+        }
         return Stack(children: [
           MapLibreMap(
             key: ValueKey(_styleIds.join(',')), // 지도 추가/삭제 시 새 스타일로 다시 생성
@@ -506,6 +530,41 @@ class _MapPageState extends State<MapPage> {
       },
     );
   }
+
+  Widget _safe(List<MapPack> packs) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.warning_amber, size: 56, color: Colors.orangeAccent),
+            const SizedBox(height: 12),
+            const Text('지난번 지도를 보던 중 앱이 종료됐습니다', style: TextStyle(fontSize: 17)),
+            const SizedBox(height: 6),
+            const Text('같은 문제가 반복되지 않도록 지도를 바로 열지 않았습니다.',
+                textAlign: TextAlign.center, style: TextStyle(color: Colors.white60)),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: () async {
+                await store.markMapOpen(false);
+                setState(() => _safeMode = false);
+              },
+              icon: const Icon(Icons.refresh),
+              label: const Text('지도 다시 열기'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () async {
+                for (final p in packs) {
+                  await store.delete(p.id);
+                }
+                await store.markMapOpen(false);
+                if (mounted) setState(() => _safeMode = false);
+              },
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('받은 지도 삭제'),
+            ),
+          ]),
+        ),
+      );
 
   Widget _empty() => Center(
         child: Padding(

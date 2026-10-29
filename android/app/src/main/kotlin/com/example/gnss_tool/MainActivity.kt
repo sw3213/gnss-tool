@@ -2,6 +2,8 @@ package com.example.gnss_tool
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.ActivityManager
+import android.app.ApplicationExitInfo
 import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.Sensor
@@ -13,11 +15,14 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.location.OnNmeaMessageListener
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 // 폰 내장 GNSS / 기압계 -> Dart (데이터 출처 "폰 GPS". 나중에 ESP32 BLE가 같은 자리에 들어감)
 //  gnss_tool/gnss     : {type: nmea|sats|loc, ...}  오류 코드 PERMISSION_DENIED, GPS_OFF
@@ -29,9 +34,66 @@ class MainActivity : FlutterActivity() {
     private var gnssSink: EventChannel.EventSink? = null
     private var pressureListener: SensorEventListener? = null
 
+    override fun onCreate(savedInstanceState: Bundle?) {
+        // 자바 쪽 예외로 죽으면 원인을 파일에 남김 -> 다음 실행 때 앱 화면에 보여 줌
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, e ->
+            runCatching { crashFile().writeText(e.stackTraceToString().take(6000)) }
+            previous?.uncaughtException(thread, e)
+        }
+        super.onCreate(savedInstanceState)
+    }
+
+    private fun crashFile() = File(filesDir, "last_crash.txt")
+
+    /** 지난 실행이 비정상 종료였다면 그 이유(한 번만 반환), 아니면 null */
+    private fun lastCrash(): String? {
+        val parts = mutableListOf<String>()
+        val f = crashFile()
+        if (f.exists()) {
+            parts += f.readText()
+            f.delete()
+        }
+        // 네이티브(지도 엔진 C++) 크래시는 위 처리기에 안 잡힘 -> 안드로이드 종료 기록(11+)에서 읽음
+        if (Build.VERSION.SDK_INT >= 30) {
+            val prefs = getSharedPreferences("diag", MODE_PRIVATE)
+            val seen = prefs.getLong("exit_ts", 0)
+            val am = getSystemService(ActivityManager::class.java)
+            val info = am.getHistoricalProcessExitReasons(packageName, 0, 1).firstOrNull()
+            if (info != null && info.timestamp > seen) {
+                prefs.edit().putLong("exit_ts", info.timestamp).apply()
+                val reason = when (info.reason) {
+                    ApplicationExitInfo.REASON_CRASH -> "자바 예외"
+                    ApplicationExitInfo.REASON_CRASH_NATIVE -> "네이티브 크래시"
+                    ApplicationExitInfo.REASON_ANR -> "응답 없음(ANR)"
+                    ApplicationExitInfo.REASON_LOW_MEMORY -> "메모리 부족"
+                    else -> null
+                }
+                if (reason != null) {
+                    parts += "종료 이유: $reason (${info.description ?: ""})"
+                    if (Build.VERSION.SDK_INT >= 31 && info.reason == ApplicationExitInfo.REASON_CRASH_NATIVE) {
+                        // 톰스톤(바이너리)에서 읽을 수 있는 문자열만 추림: 중단 메시지, 스택의 라이브러리·함수 이름
+                        val bytes = runCatching { info.traceInputStream?.use { it.readBytes() } }.getOrNull()
+                        if (bytes != null) {
+                            val text = Regex("[\\x20-\\x7e]{6,}").findAll(String(bytes, Charsets.ISO_8859_1))
+                                .map { it.value }.distinct().take(80).joinToString("\n")
+                            parts += text.take(5000)
+                        }
+                    }
+                }
+            }
+        }
+        return parts.takeIf { it.isNotEmpty() }?.joinToString("\n\n")
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val messenger = flutterEngine.dartExecutor.binaryMessenger
+
+        MethodChannel(messenger, "gnss_tool/diag").setMethodCallHandler { call, result ->
+            if (call.method == "lastCrash") result.success(runCatching { lastCrash() }.getOrNull())
+            else result.notImplemented()
+        }
 
         EventChannel(messenger, "gnss_tool/gnss").setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink) {

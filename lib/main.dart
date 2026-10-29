@@ -491,7 +491,42 @@ class _HomePageState extends State<HomePage> {
     // 앱을 내려도 GPS·센서를 계속 켜 둠 (사용자 선택: 내렸다 돌아올 때 다시 잡는 게 불편).
     // 배터리를 더 쓰며, 안드로이드가 백그라운드 위치·센서 전달을 줄일 수는 있음
     _resume();
-    WidgetsBinding.instance.addPostFrameCallback((_) => checkForUpdate(context));
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _showLastCrash();
+      if (mounted) checkForUpdate(context);
+    });
+  }
+
+  /// 지난 실행이 비정상 종료였으면 원인을 보여 줌 (캡처해서 보내면 원인 파악 가능)
+  Future<void> _showLastCrash() async {
+    if (!isAndroid) return;
+    String? text;
+    try {
+      text = await const MethodChannel('gnss_tool/diag').invokeMethod<String>('lastCrash');
+    } catch (_) {}
+    if (text == null || !mounted) return;
+    final report = text;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('지난번에 앱이 비정상 종료됐습니다'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 320,
+          child: SingleChildScrollView(
+            child: SelectableText(report,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 10.5)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Clipboard.setData(ClipboardData(text: report)),
+            child: const Text('복사'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('닫기')),
+        ],
+      ),
+    );
   }
 
   @override
