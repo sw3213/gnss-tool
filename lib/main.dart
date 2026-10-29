@@ -483,22 +483,19 @@ class _HomePageState extends State<HomePage> {
   PhoneGnss? _phone;
   Timer? _sampler;
   double? _pressure, _temp, _humidity; // 출처가 보낸 최신 센서 값
-  late final AppLifecycleListener _lifecycle;
   int tab = 0;
 
   @override
   void initState() {
     super.initState();
+    // 앱을 내려도 GPS·센서를 계속 켜 둠 (사용자 선택: 내렸다 돌아올 때 다시 잡는 게 불편).
+    // 배터리를 더 쓰며, 안드로이드가 백그라운드 위치·센서 전달을 줄일 수는 있음
     _resume();
-    // 배터리: 앱이 화면에서 사라지면(홈 버튼, 다른 앱) GPS·센서를 끄고, 돌아오면 다시 켬.
-    // 권한 요청 창처럼 위에 잠깐 덮이는 경우(inactive)는 해당 안 됨
-    _lifecycle = AppLifecycleListener(onHide: _pause, onShow: _resume);
     WidgetsBinding.instance.addPostFrameCallback((_) => checkForUpdate(context));
   }
 
   @override
   void dispose() {
-    _lifecycle.dispose();
     _pause();
     super.dispose();
   }
@@ -514,7 +511,7 @@ class _HomePageState extends State<HomePage> {
     _stop();
     _sampler?.cancel();
     _sampler = null;
-    baro.reset(); // 앱을 내린 사이 이동했을 수 있으므로 고도는 다시 잡음 (기압 추세 기록은 유지)
+    baro.reset();
   }
 
   void _onLine(String line) {
