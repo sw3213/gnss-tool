@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'analysis.dart';
 import 'dop.dart';
 import 'main_screen.dart';
 import 'nav.dart';
@@ -494,6 +495,7 @@ class _HomePageState extends State<HomePage> {
   final mapControl = MapControl();
   final heading = ValueNotifier<double?>(null); // 폰이 향한 방위 (진북 기준)
   StreamSubscription<dynamic>? _headingSub;
+  late final analysis = TerrainAnalysis(snap: parser.notifier, heading: heading);
 
   @override
   void initState() {
@@ -506,6 +508,7 @@ class _HomePageState extends State<HomePage> {
     track.points.addListener(() => mapControl.setTrack(track.points.value));
     waypoints.items.addListener(() => mapControl.setWaypoints(waypoints.items.value));
     waypoints.load();
+    if (isAndroid) analysis.start(); // 고도 데이터·지도 파일은 안드로이드에서만 받음
     if (isAndroid) {
       _headingSub = const EventChannel('gnss_tool/heading').receiveBroadcastStream().listen((d) {
         heading.value = (d as num).toDouble();
@@ -581,6 +584,7 @@ class _HomePageState extends State<HomePage> {
     _pause();
     _headingSub?.cancel();
     parser.notifier.removeListener(_onPosition);
+    if (isAndroid) analysis.dispose();
     super.dispose();
   }
 
@@ -699,6 +703,7 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return MainScreen(
+      analysis: analysis,
       snap: parser.notifier,
       sensors: sensors,
       weather: weather,

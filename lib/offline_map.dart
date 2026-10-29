@@ -273,7 +273,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
   final contourLabels = [for (final p in terrain) ..._contourLabelLayers('t_${p.id}')];
   var placed = false;
 
-  for (final p in packs.where((p) => !p.isTerrain)) {
+  for (final p in packs.where((p) => p.kind == 'basemap')) {
     final s = 'm_${p.id}';
     sources[s] = {
       'type': 'vector',
@@ -606,6 +606,37 @@ class MapControl {
     if (_ready) _ctl?.setGeoJsonSource('track', _track);
   }
 
+  /// 가시권 그림(가려진 곳 어둡게)을 지도에 겹침. 내 위치·이동 기록 선 아래에 그림
+  Future<void> showViewshed(Uint8List png, double north, double south, double west, double east) async {
+    final c = _ctl;
+    if (c == null || !_ready) return;
+    await hideViewshed();
+    await c.addImageSource(
+      'viewshed',
+      png,
+      LatLngQuad(
+        topLeft: LatLng(north, west),
+        topRight: LatLng(north, east),
+        bottomRight: LatLng(south, east),
+        bottomLeft: LatLng(south, west),
+      ),
+    );
+    // 두 번째 인자가 그림 소스, 세 번째가 "이 레이어 아래에" (플러그인 인자 이름이 헷갈리게 되어 있음)
+    await c.addImageLayerBelow('viewshed', 'viewshed', 'track');
+    _viewshedShown = true;
+  }
+
+  bool _viewshedShown = false;
+
+  Future<void> hideViewshed() async {
+    if (!_viewshedShown) return;
+    _viewshedShown = false;
+    try {
+      await _ctl?.removeLayer('viewshed');
+      await _ctl?.removeSource('viewshed');
+    } catch (_) {}
+  }
+
   void setWaypoints(List<Waypoint> list) {
     _wpts = {
       'type': 'FeatureCollection',
@@ -704,7 +735,8 @@ class _MapPageState extends State<MapPage> {
     return ValueListenableBuilder<List<MapPack>>(
       valueListenable: store.installed,
       builder: (_, packs, __) {
-        if (packs.isEmpty) return _empty();
+        // 분석용 고도 데이터(dem)만 있으면 그릴 지도가 없음
+        if (!packs.any((p) => p.kind == 'basemap' || p.isTerrain)) return _empty();
         final style = _style;
         if (style == null || _safeMode == null) return const Center(child: CircularProgressIndicator());
         if (_safeMode!) return _safe(packs);
@@ -744,7 +776,7 @@ class _MapPageState extends State<MapPage> {
               const SizedBox(height: 4),
               Text(
                   '© OpenStreetMap${packs.any((p) => p.isTerrain) ? ' · © Copernicus DEM' : ''}'
-                  '  ·  ${packs.where((p) => !p.isTerrain).map((p) => p.date).join(', ')}',
+                  '  ·  ${packs.where((p) => p.kind == 'basemap').map((p) => p.date).join(', ')}',
                   style: const TextStyle(fontSize: 9, color: Colors.black54)),
             ]),
           ),

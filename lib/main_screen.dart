@@ -6,10 +6,12 @@ import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' show CameraPosition;
 import 'package:path_provider/path_provider.dart';
 
+import 'analysis.dart';
 import 'main.dart';
 import 'nav.dart';
 import 'offline_map.dart';
 import 'updater.dart';
+import 'water.dart' show waterChipLabel;
 import 'weather.dart';
 
 // ============================================================
@@ -32,8 +34,10 @@ class MainScreen extends StatefulWidget {
   final DataSource source;
   final void Function(DataSource) onSource;
   final VoidCallback onRetrySource, onDismissAlert;
+  final TerrainAnalysis analysis;
 
   const MainScreen({
+    required this.analysis,
     super.key,
     required this.snap,
     required this.sensors,
@@ -61,6 +65,36 @@ const _panelMin = 0.13, _panelInit = 0.24, _panelMax = 0.62;
 
 class _MainScreenState extends State<MainScreen> {
   final _sheet = ValueNotifier<double>(_panelInit); // 아래 패널이 화면에서 차지하는 비율
+  final _viewshedOn = ValueNotifier<bool>(false);
+
+  void _needDem() => ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('지형 분석에는 "대한민국 고도 데이터 (분석용)"이 필요합니다'),
+        action: SnackBarAction(
+          label: '받기',
+          onPressed: () =>
+              Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage())),
+        ),
+      ));
+
+  /// 👁 가시권: 현재 위치에서 5 km 안 지형에 가려 안 보이는 곳을 어둡게
+  Future<void> _toggleViewshed() async {
+    final messenger = ScaffoldMessenger.of(context);
+    if (_viewshedOn.value) {
+      _viewshedOn.value = false;
+      await widget.map.hideViewshed();
+      return;
+    }
+    if (!widget.analysis.hasDem.value) return _needDem();
+    final img = await widget.analysis.viewshedImage();
+    if (img == null) {
+      messenger.showSnackBar(const SnackBar(content: Text('현재 위치가 있어야 가시권을 계산할 수 있습니다')));
+      return;
+    }
+    final (png, n, s, w, e) = img;
+    await widget.map.showViewshed(png, n, s, w, e);
+    _viewshedOn.value = true;
+    messenger.showSnackBar(const SnackBar(content: Text('어두운 곳 = 지형에 가려 보이지 않는 곳 (반경 5 km, 나무·건물 제외)')));
+  }
 
   void _push(Widget page, String title) => Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (_) => Scaffold(appBar: AppBar(title: Text(title)), body: page),
@@ -157,6 +191,21 @@ class _MainScreenState extends State<MainScreen> {
               _GpsStatusChip(snap: widget.snap, sourceLabel: widget.sourceLabel),
               const SizedBox(height: 10),
               _CompassButton(map: widget.map, heading: widget.heading),
+              const SizedBox(height: 6),
+              // "전방 내리막 -5m · -4%" (바라보는 방향 100 m 앞)
+              ValueListenableBuilder<String?>(
+                valueListenable: widget.analysis.slope,
+                builder: (_, s, __) => s == null
+                    ? const SizedBox.shrink()
+                    : _MapChip(
+                        icon: s.contains('오르막')
+                            ? Icons.north_east
+                            : s.contains('내리막')
+                                ? Icons.south_east
+                                : Icons.east,
+                        text: s,
+                      ),
+              ),
             ]),
           ),
           // 오른쪽 아래(패널 위): 3D, 내 위치
@@ -166,6 +215,16 @@ class _MainScreenState extends State<MainScreen> {
               right: 10,
               bottom: ext * box.maxHeight + 10,
               child: Column(children: [
+                ValueListenableBuilder<bool>(
+                  valueListenable: _viewshedOn,
+                  builder: (_, on, __) => _RoundButton(
+                    tooltip: '가시권 (지형에 가려 안 보이는 곳)',
+                    active: on,
+                    onTap: _toggleViewshed,
+                    child: const Icon(Icons.visibility_outlined, size: 22),
+                  ),
+                ),
+                const SizedBox(height: 10),
                 ValueListenableBuilder<bool>(
                   valueListenable: widget.map.tilted,
                   builder: (_, on, __) => _RoundButton(
@@ -197,7 +256,43 @@ class _MainScreenState extends State<MainScreen> {
             builder: (_, ext, __) => Positioned(
               left: 10,
               bottom: ext * box.maxHeight + 10,
-              child: _SunChip(snap: widget.snap),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                // "수원지 1.5 km" — 누르면 지도에서 그 위치로
+                ValueListenableBuilder(
+                  valueListenable: widget.analysis.water,
+                  builder: (_, w, __) => w == null
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: GestureDetector(
+                            onTap: () {
+                              widget.map.recenter(w.lat, w.lon);
+                              widget.map.follow.value = false;
+                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                content: Text('${w.label}${w.name == null ? '' : ' (${w.name})'} · '
+                                    '${distanceLabel(w.distanceM)}'),
+                              ));
+                            },
+                            child: _MapChip(icon: Icons.water_drop_outlined, text: waterChipLabel(w)),
+                          ),
+                        ),
+                ),
+                GestureDetector(
+                  onTap: () {
+                    final d = widget.analysis.sunDetail();
+                    if (d == null) return _needDem();
+                    showDialog<void>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('오늘 해'),
+                        content: Text(d),
+                        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('닫기'))],
+                      ),
+                    );
+                  },
+                  child: _SunChip(analysis: widget.analysis),
+                ),
+              ]),
             ),
           ),
           // 아래 정보 패널 (끌어올리면 더 보임)
@@ -355,9 +450,10 @@ class _RoundButton extends StatelessWidget {
       );
 }
 
+/// "일출까지 7시간 31분" — 고도 데이터가 있으면 산 능선 위로 해가 보이는 시각 기준
 class _SunChip extends StatefulWidget {
-  final ValueListenable<GnssSnapshot> snap;
-  const _SunChip({required this.snap});
+  final TerrainAnalysis analysis;
+  const _SunChip({required this.analysis});
 
   @override
   State<_SunChip> createState() => _SunChipState();
@@ -369,12 +465,14 @@ class _SunChipState extends State<_SunChip> {
   @override
   Widget build(BuildContext context) => StreamBuilder<int>(
         stream: _tick,
-        builder: (_, __) {
-          final s = widget.snap.value;
-          final text = s.lat == null ? null : sunCountdown(DateTime.now(), s.lat!, s.lon!);
-          if (text == null) return const SizedBox.shrink();
-          return _MapChip(icon: text.startsWith('일출') ? Icons.wb_twilight : Icons.wb_sunny_outlined, text: text);
-        },
+        builder: (_, __) => ValueListenableBuilder(
+          valueListenable: widget.analysis.sunToday,
+          builder: (_, __, ___) {
+            final text = widget.analysis.sunChip(DateTime.now());
+            if (text == null) return const SizedBox.shrink();
+            return _MapChip(icon: text.startsWith('일출') ? Icons.wb_twilight : Icons.wb_sunny_outlined, text: text);
+          },
+        ),
       );
 }
 
