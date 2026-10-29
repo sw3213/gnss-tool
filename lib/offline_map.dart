@@ -229,10 +229,21 @@ class DlState {
 }
 
 
-// ---------------- 지도 스타일 (Protomaps v4 스키마, 어두운 테마) ----------------
+// ---------------- 지도 스타일 ----------------
+// 바탕은 Protomaps 공식 밝은 테마(assets/map/style-light.json, maps/gen-style.mjs로 생성, 한국어 라벨):
+// 건물·번지·아이콘(버스 정류장, 식수대, 봉우리…)·도로 번호판 포함. 여기에 등산로 강조와 건물 이름을 더함.
 // 한글 등 CJK 글자는 MapLibre가 폰 기본 글꼴로 그림 -> 라틴/숫자 글리프만 앱에 포함
 
 Future<String> buildStyle(List<MapPack> packs) async {
+  var raw = await rootBundle.loadString('assets/map/style-light.json');
+  // asset:// 경로에 공백이 들어가지 않도록 글꼴 이름을 앱 폴더 이름에 맞춤.
+  // 힌디어 등 데바나가리 문자 전용 글꼴은 한국 지도에 필요 없어 일반 글꼴로 대체
+  raw = raw.replaceAll('Noto Sans Devanagari Regular v1', 'NotoSansRegular');
+  for (final w in ['Regular', 'Medium', 'Italic']) {
+    raw = raw.replaceAll('Noto Sans $w', 'NotoSans$w');
+  }
+  final base = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+
   final sources = <String, dynamic>{
     'me': {
       'type': 'geojson',
@@ -240,11 +251,9 @@ Future<String> buildStyle(List<MapPack> packs) async {
     },
   };
   final layers = <Map<String, dynamic>>[
-    {'id': 'bg', 'type': 'background', 'paint': {'background-color': '#16181c'}},
+    for (final l in base)
+      if (l['source'] == null) l, // 배경
   ];
-  const name = ['coalesce', ['get', 'name:ko'], ['get', 'name']];
-  const font = ['NotoSansRegular'];
-  const fontBold = ['NotoSansMedium'];
 
   for (final p in packs) {
     final s = 'm_${p.id}';
@@ -253,132 +262,81 @@ Future<String> buildStyle(List<MapPack> packs) async {
       'url': 'pmtiles://file://${MapStore.instance.fileOf(p.id)}',
       'attribution': '© OpenStreetMap contributors',
     };
-    Map<String, dynamic> l(String id, String type, String layer, Map<String, dynamic> rest) =>
-        {'id': '$s-$id', 'type': type, 'source': s, 'source-layer': layer, ...rest};
-
-    layers.addAll([
-      l('earth', 'fill', 'earth', {'paint': {'fill-color': '#202328'}}),
-      l('landcover', 'fill', 'landcover', {
-        'paint': {
-          'fill-color': ['match', ['get', 'kind'], ['forest', 'scrub'], '#1f2e24', 'grassland', '#232f26', '#202328'],
-          'fill-opacity': ['interpolate', ['linear'], ['zoom'], 5, 1, 8, 0],
-        },
-      }),
-      l('green', 'fill', 'landuse', {
-        'filter': ['in', ['get', 'kind'], ['literal', ['forest', 'wood', 'park', 'national_park', 'nature_reserve', 'protected_area', 'grass', 'meadow', 'scrub', 'garden', 'golf_course']]],
-        'paint': {'fill-color': '#1f3125'},
-      }),
-      l('urban', 'fill', 'landuse', {
-        'filter': ['in', ['get', 'kind'], ['literal', ['residential', 'commercial', 'industrial', 'school', 'hospital', 'university', 'college']]],
-        'paint': {'fill-color': '#26292f'},
-      }),
-      l('water', 'fill', 'water', {'paint': {'fill-color': '#1d3346'}}),
-      l('buildings', 'fill', 'buildings', {'minzoom': 14, 'paint': {'fill-color': '#30333a'}}),
-      l('boundaries', 'line', 'boundaries', {
-        'filter': ['<=', ['get', 'kind_detail'], 4],
-        'paint': {'line-color': '#7a7d85', 'line-width': 1, 'line-dasharray': [3, 2]},
-      }),
-      // 등산로·오솔길: 아웃도어 용도라 점선으로 잘 보이게
-      l('paths', 'line', 'roads', {
-        'minzoom': 12,
-        'filter': ['==', ['get', 'kind'], 'path'],
-        'paint': {
-          'line-color': '#c9a46a',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 12, 0.6, 16, 1.6],
-          'line-dasharray': [2, 1.5],
-        },
-      }),
-      l('minor', 'line', 'roads', {
-        'filter': ['==', ['get', 'kind'], 'minor_road'],
-        'paint': {'line-color': '#4b4f57', 'line-width': ['interpolate', ['linear'], ['zoom'], 12, 0.5, 16, 4]},
-      }),
-      l('major', 'line', 'roads', {
-        'filter': ['==', ['get', 'kind'], 'major_road'],
-        'paint': {'line-color': '#7d7360', 'line-width': ['interpolate', ['linear'], ['zoom'], 7, 0.5, 16, 6]},
-      }),
-      l('highway', 'line', 'roads', {
-        'filter': ['==', ['get', 'kind'], 'highway'],
-        'paint': {'line-color': '#b98a45', 'line-width': ['interpolate', ['linear'], ['zoom'], 5, 0.6, 16, 8]},
-      }),
-      l('rail', 'line', 'roads', {
-        'filter': ['==', ['get', 'kind'], 'rail'],
-        'paint': {'line-color': '#6b6f78', 'line-width': 1, 'line-dasharray': [4, 2]},
-      }),
-      l('water-label', 'symbol', 'water', {
-        'minzoom': 11,
-        'layout': {'text-field': name, 'text-font': font, 'text-size': 11},
-        'paint': {'text-color': '#6f9cc0', 'text-halo-color': '#16181c', 'text-halo-width': 1},
-      }),
-      l('road-label', 'symbol', 'roads', {
-        'minzoom': 13,
-        'filter': ['in', ['get', 'kind'], ['literal', ['highway', 'major_road', 'minor_road', 'path']]],
-        'layout': {'symbol-placement': 'line', 'text-field': name, 'text-font': font, 'text-size': 11},
-        'paint': {'text-color': '#b0b3ba', 'text-halo-color': '#16181c', 'text-halo-width': 1},
-      }),
-      // 산봉우리: 이름 + 높이
-      l('peaks', 'symbol', 'pois', {
-        'minzoom': 10,
-        'filter': ['==', ['get', 'kind'], 'peak'],
-        'layout': {
-          'text-field': [
-            'format', '▲ ', {}, name, {},
-            ['case', ['has', 'elevation'], ['concat', '\n', ['to-string', ['round', ['get', 'elevation']]], ' m'], ''], {'font-scale': 0.85},
-          ],
-          'text-font': font,
-          'text-size': 12,
-          'text-anchor': 'top',
-        },
-        'paint': {'text-color': '#d8c39a', 'text-halo-color': '#16181c', 'text-halo-width': 1.2},
-      }),
-      // 물 (식수대·급수 지점) — 수원지 기능의 바탕
-      l('water-poi', 'symbol', 'pois', {
-        'minzoom': 13,
-        'filter': ['in', ['get', 'kind'], ['literal', ['drinking_water', 'water_point', 'watering_place', 'spring']]],
-        'layout': {'text-field': ['concat', '💧 ', ['coalesce', ['get', 'name:ko'], ['get', 'name'], '물']], 'text-font': font, 'text-size': 11},
-        'paint': {'text-color': '#7fc4ff', 'text-halo-color': '#16181c', 'text-halo-width': 1.2},
-      }),
-      l('places', 'symbol', 'places', {
-        'filter': ['in', ['get', 'kind'], ['literal', ['country', 'region', 'locality', 'neighbourhood', 'macrohood']]],
-        'layout': {
-          'text-field': name,
-          'text-font': fontBold,
-          'text-size': ['match', ['get', 'kind'], 'country', 16, 'region', 14, 'locality', 13, 11],
-          'symbol-sort-key': ['get', 'sort_rank'],
-        },
-        'paint': {'text-color': '#e6e6e6', 'text-halo-color': '#16181c', 'text-halo-width': 1.5},
-      }),
-    ]);
+    for (final l in base) {
+      if (l['source'] == null) continue;
+      // 라벨(번지) 바로 앞에 우리 레이어를 끼워 넣어 도로 위, 글자 아래에 그려지게 함
+      if (l['id'] == 'address_label') layers.addAll(_extraLayers(s));
+      layers.add({...l, 'id': '$s-${l['id']}', 'source': s});
+    }
   }
-
-  // 내 위치 (맨 위)
-  layers.addAll([
-    {
-      'id': 'me-acc',
-      'type': 'circle',
-      'source': 'me',
-      'paint': {'circle-radius': 18, 'circle-color': '#4aa3ff', 'circle-opacity': 0.15},
-    },
-    {
-      'id': 'me',
-      'type': 'circle',
-      'source': 'me',
-      'paint': {
-        'circle-radius': 7,
-        'circle-color': '#4aa3ff',
-        'circle-stroke-color': '#ffffff',
-        'circle-stroke-width': 2,
-      },
-    },
-  ]);
+  layers.addAll(_meLayers);
 
   return jsonEncode({
     'version': 8,
     'name': 'gnss-offline',
     'glyphs': 'asset://flutter_assets/assets/map/fonts/{fontstack}/{range}.pbf',
+    'sprite': 'asset://flutter_assets/assets/map/sprites/light',
     'sources': sources,
     'layers': layers,
   });
 }
+
+List<Map<String, dynamic>> _extraLayers(String s) => [
+      // 등산로·오솔길: MAPS.ME처럼 붉은 갈색 점선으로 잘 보이게 (기본 스타일은 흐린 회색)
+      {
+        'id': '$s-trails',
+        'type': 'line',
+        'source': s,
+        'source-layer': 'roads',
+        'minzoom': 12,
+        'filter': [
+          'in',
+          ['get', 'kind_detail'],
+          ['literal', ['path', 'footway', 'track', 'bridleway', 'steps']],
+        ],
+        'paint': {
+          'line-color': '#b5562f',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 12, 0.8, 17, 2.4],
+          'line-dasharray': [2, 1.2],
+        },
+      },
+      // 건물 이름 (아파트 "201동" 등)
+      {
+        'id': '$s-building-names',
+        'type': 'symbol',
+        'source': s,
+        'source-layer': 'buildings',
+        'minzoom': 16,
+        'filter': ['has', 'name'],
+        'layout': {
+          'text-field': ['coalesce', ['get', 'name:ko'], ['get', 'name']],
+          'text-font': ['NotoSansRegular'],
+          'text-size': 11,
+        },
+        'paint': {'text-color': '#6b6258', 'text-halo-color': '#ffffff', 'text-halo-width': 1},
+      },
+    ];
+
+// 내 위치 (맨 위)
+const _meLayers = [
+  {
+    'id': 'me-acc',
+    'type': 'circle',
+    'source': 'me',
+    'paint': {'circle-radius': 18, 'circle-color': '#3b6cf6', 'circle-opacity': 0.15},
+  },
+  {
+    'id': 'me',
+    'type': 'circle',
+    'source': 'me',
+    'paint': {
+      'circle-radius': 7,
+      'circle-color': '#3b6cf6',
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 2,
+    },
+  },
+];
 
 // ---------------- 지도 화면 ----------------
 
@@ -482,6 +440,7 @@ class _MapPageState extends State<MapPage> {
             initialCameraPosition: _initialCamera(),
             trackCameraPosition: true,
             compassEnabled: true,
+            scaleControlEnabled: true, // 축척 막대 (왼쪽 아래)
             onMapCreated: (c) => _ctl = c,
             onStyleLoadedCallback: () {
               _styleReady = true;
@@ -493,6 +452,30 @@ class _MapPageState extends State<MapPage> {
             },
             onCameraTrackingDismissed: () => setState(() => _follow = false),
             onMapClick: (_, __) => setState(() => _follow = false),
+          ),
+          Positioned(
+            right: 12,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: Card(
+                color: Colors.white,
+                shape: const StadiumBorder(),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    icon: const Icon(Icons.add, color: Colors.black87),
+                    tooltip: '확대',
+                    onPressed: () => _ctl?.animateCamera(CameraUpdate.zoomIn()),
+                  ),
+                  const SizedBox(width: 28, child: Divider(height: 1)),
+                  IconButton(
+                    icon: const Icon(Icons.remove, color: Colors.black87),
+                    tooltip: '축소',
+                    onPressed: () => _ctl?.animateCamera(CameraUpdate.zoomOut()),
+                  ),
+                ]),
+              ),
+            ),
           ),
           Positioned(
             right: 12,

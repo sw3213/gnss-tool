@@ -30,3 +30,7 @@ flutter:
     # 지도 라벨용 라틴/숫자 글리프 (한글은 폰 글꼴 사용). 출처: protomaps/basemaps-assets
     - assets/map/fonts/NotoSansRegular/
     - assets/map/fonts/NotoSansMedium/
+    - assets/map/fonts/NotoSansItalic/
+    # Protomaps 공식 밝은 테마 (maps/gen-style.mjs로 생성) + 아이콘 시트
+    - assets/map/style-light.json
+    - assets/map/sprites/
