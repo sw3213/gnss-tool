@@ -5,6 +5,9 @@ on:
   push:
     branches: [main, master]
 
+permissions:
+  contents: write # GitHub Release 만들기 (앱 내 업데이트가 여기서 APK를 받음)
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,15 +24,41 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Generate Android scaffolding
+      # 항상 같은 키로 서명해야 폰에 설치된 앱 위로 업데이트됨
+      - name: Restore signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
-          flutter create --platforms=android --project-name gnss_tool --org com.example _tmp_app
-          cp -r _tmp_app/android ./android
-          rm -rf _tmp_app
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::KEYSTORE_BASE64 / KEYSTORE_PASSWORD secrets are missing"
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.jks
+          cat > android/key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEYSTORE_PASSWORD
+          keyAlias=gnss_tool
+          storeFile=release.jks
+          EOF
 
       - run: flutter pub get
 
-      - run: flutter build apk --release
+      # 빌드 번호 = 실행 번호. 앱은 Release 태그(build-N)의 N과 자기 빌드 번호를 비교함
+      - run: >-
+          flutter build apk --release
+          --build-number=${{ github.run_number }}
+          --build-name=0.1.${{ github.run_number }}
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk gnss_tool.apk
+          gh release create "build-${{ github.run_number }}" gnss_tool.apk \
+            --title "빌드 ${{ github.run_number }}" \
+            --notes "$(git log -1 --pretty=%s)" \
+            --target "${{ github.sha }}"
 
       - uses: actions/upload-artifact@v4
         with:

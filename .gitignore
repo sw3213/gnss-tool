@@ -1,0 +1,17 @@
+# Flutter / Dart
+.dart_tool/
+build/
+.flutter-plugins-dependencies
+*.iml
+.idea/
+
+# Release signing key: never commit (android/.gitignore also covers these)
+key.properties
+*.jks
+*.keystore
+
+# Local Claude Code preview config
+.claude/
+
+# Local browser preview only (`flutter create --platforms=web`)
+web/

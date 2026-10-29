@@ -4,6 +4,8 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'updater.dart';
+
 void main() => runApp(const GnssApp());
 
 class GnssApp extends StatelessWidget {
@@ -50,6 +52,20 @@ class GnssSnapshot {
     this.badChecksum = 0,
   });
 }
+
+class SensorSample {
+  final DateTime t;
+  final double pressure; // hPa (BMP280)
+  final double temp; // °C (AHT20)
+  final double humidity; // %RH (AHT20)
+  final double? gnssAlt; // m, 같은 시각 GGA 고도
+  const SensorSample(this.t, this.pressure, this.temp, this.humidity, this.gnssAlt);
+
+  // 표준대기(1013.25 hPa) 기준 기압 고도. 해면기압 보정은 폭풍 경보 단계에서
+  double get baroAlt => 44330 * (1 - pow(pressure / 1013.25, 1 / 5.255).toDouble());
+}
+
+const sensorWindow = 300; // 최근 5분 (1초 간격)
 
 const sysList = ['GPS', 'GLO', 'GAL', 'BDS'];
 
@@ -266,7 +282,8 @@ class _SatSim {
 
 class GnssSimulator {
   final void Function(String line) onLine;
-  GnssSimulator(this.onLine);
+  final void Function(double pressure, double temp, double humidity)? onSensor;
+  GnssSimulator(this.onLine, {this.onSensor});
 
   static const _talkers = ['GP', 'GL', 'GA', 'GB'];
   final _rnd = Random(7);
@@ -378,6 +395,13 @@ class GnssSimulator {
       onLine(l);
     }
     onLine(gga);
+
+    // 가짜 BMP280/AHT20 값: 고도 45 m 부근 기압에 느린 변화 + 잡음
+    onSensor?.call(
+      1007.9 + 0.6 * sin(t / 300) + (_rnd.nextDouble() - 0.5) * 0.1,
+      18.0 + 1.5 * sin(t / 600) + (_rnd.nextDouble() - 0.5) * 0.2,
+      55.0 - 4.0 * sin(t / 600) + (_rnd.nextDouble() - 0.5) * 1.0,
+    );
   }
 
   final Map<int, List<int>> _usedTmp = {};
@@ -396,6 +420,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final parser = NmeaParser();
   final log = ValueNotifier<List<String>>([]);
+  final sensors = ValueNotifier<List<SensorSample>>([]);
   final _buf = <String>[];
   late final GnssSimulator sim;
   int tab = 0;
@@ -408,8 +433,13 @@ class _HomePageState extends State<HomePage> {
       _buf.add(line);
       if (_buf.length > 60) _buf.removeRange(0, _buf.length - 60);
       if (line.contains('GGA')) log.value = List.of(_buf);
+    }, onSensor: (p, t, h) {
+      final next = [...sensors.value, SensorSample(DateTime.now(), p, t, h, parser.notifier.value.alt)];
+      if (next.length > sensorWindow) next.removeRange(0, next.length - sensorWindow);
+      sensors.value = next;
     });
     sim.start();
+    WidgetsBinding.instance.addPostFrameCallback((_) => checkForUpdate(context));
   }
 
   @override
@@ -423,10 +453,21 @@ class _HomePageState extends State<HomePage> {
     final pages = <Widget>[
       SkyPage(snap: parser.notifier),
       QualityPage(snap: parser.notifier),
+      SensorPage(data: sensors),
       LogPage(log: log),
     ];
     return Scaffold(
-      appBar: AppBar(title: const Text('GNSS Tool  (시뮬레이션)')),
+      appBar: AppBar(
+        title: const Text('GNSS Tool  (시뮬레이션)'),
+        actions: [
+          if (updateSupported)
+            IconButton(
+              icon: const Icon(Icons.system_update),
+              tooltip: '업데이트 확인',
+              onPressed: () => checkForUpdate(context, manual: true),
+            ),
+        ],
+      ),
       body: pages[tab],
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
@@ -434,6 +475,7 @@ class _HomePageState extends State<HomePage> {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.public), label: '스카이플롯'),
           NavigationDestination(icon: Icon(Icons.speed), label: '품질'),
+          NavigationDestination(icon: Icon(Icons.show_chart), label: '센서'),
           NavigationDestination(icon: Icon(Icons.terminal), label: 'NMEA'),
         ],
       ),
@@ -623,6 +665,134 @@ class QualityPage extends StatelessWidget {
       },
     );
   }
+}
+
+// ---------------- 센서 대시보드 ----------------
+
+class SensorPage extends StatelessWidget {
+  final ValueListenable<List<SensorSample>> data;
+  const SensorPage({super.key, required this.data});
+
+  Widget _chart(String title, String unit, int digits, double minSpan, Color color,
+      double? Function(SensorSample) value,
+      {double? Function(SensorSample)? second, String? legend}) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          ValueListenableBuilder<List<SensorSample>>(
+            valueListenable: data,
+            builder: (_, list, __) => Text(
+              '$title  ${list.isEmpty ? '--' : fmt(value(list.last), digits)} $unit',
+              style: TextStyle(fontSize: 16, color: color),
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 110,
+            child: RepaintBoundary(
+              child: CustomPaint(
+                painter: LineChartPainter(data, value, color, digits, minSpan, second: second),
+                size: Size.infinite,
+              ),
+            ),
+          ),
+          if (legend != null) ...[
+            const SizedBox(height: 4),
+            Text(legend, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+          ],
+        ]),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(12),
+      children: [
+        _chart('기압', 'hPa', 1, 2, Colors.lightBlueAccent, (s) => s.pressure),
+        _chart('온도', '°C', 1, 2, Colors.orangeAccent, (s) => s.temp),
+        _chart('습도', '%', 0, 5, Colors.tealAccent, (s) => s.humidity),
+        _chart('기압 고도', 'm', 1, 5, Colors.amberAccent, (s) => s.baroAlt,
+            second: (s) => s.gnssAlt, legend: '노란 선 = 기압 고도 / 회색 선 = GNSS 고도'),
+        const Text('최근 5분, 1초 간격',
+            textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
+      ],
+    );
+  }
+}
+
+class LineChartPainter extends CustomPainter {
+  final ValueListenable<List<SensorSample>> data;
+  final double? Function(SensorSample) value;
+  final double? Function(SensorSample)? second;
+  final Color color;
+  final int digits;
+  final double minSpan; // 잡음이 과장되지 않도록 세로축 최소 범위
+  LineChartPainter(this.data, this.value, this.color, this.digits, this.minSpan, {this.second})
+      : super(repaint: data);
+
+  void _text(Canvas c, String s, Offset at) {
+    final tp = TextPainter(
+      text: TextSpan(text: s, style: const TextStyle(color: Colors.white38, fontSize: 10)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(c, at);
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final list = data.value;
+    canvas.drawRect(
+        Offset.zero & size,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..color = Colors.white24);
+    if (list.length < 2) {
+      _text(canvas, '데이터 수집 중...', const Offset(6, 6));
+      return;
+    }
+
+    final all = [
+      for (final s in list) ...[value(s), second?.call(s)]
+    ].whereType<double>();
+    var lo = all.reduce(min), hi = all.reduce(max);
+    if (hi - lo < minSpan) {
+      final mid = (hi + lo) / 2;
+      lo = mid - minSpan / 2;
+      hi = mid + minSpan / 2;
+    }
+
+    // 최신 값이 오른쪽 끝, 창(5분)을 다 채우기 전에는 오른쪽부터 채워짐
+    Path? line(double? Function(SensorSample) f) {
+      Path? p;
+      for (int i = 0; i < list.length; i++) {
+        final v = f(list[i]);
+        if (v == null) continue;
+        final x = size.width * (i + sensorWindow - list.length) / (sensorWindow - 1);
+        final y = size.height * (hi - v) / (hi - lo);
+        p = p == null ? (Path()..moveTo(x, y)) : (p..lineTo(x, y));
+      }
+      return p;
+    }
+
+    final stroke = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    if (second != null) {
+      final p2 = line(second!);
+      if (p2 != null) canvas.drawPath(p2, stroke..color = Colors.white54);
+    }
+    final p1 = line(value);
+    if (p1 != null) canvas.drawPath(p1, stroke..color = color);
+
+    _text(canvas, fmt(hi, digits), const Offset(4, 2));
+    _text(canvas, fmt(lo, digits), Offset(4, size.height - 14));
+  }
+
+  @override
+  bool shouldRepaint(covariant LineChartPainter old) => old.data != data;
 }
 
 // ---------------- 원시 로그 ----------------
