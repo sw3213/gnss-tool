@@ -12,7 +12,8 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove"/>
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" tools:node="remove"/>
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove"/>
+    <!-- 네트워크 상태는 MapLibre가 씀 (ConnectivityReceiver). 빼면 지도를 여는 순간 SecurityException으로 종료됨 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <application
         android:label="GNSS Tool"
         android:name="${applicationName}"
