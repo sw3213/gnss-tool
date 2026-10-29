@@ -11,6 +11,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'main.dart' show GnssSnapshot;
+import 'nav.dart';
 
 // ============================================================
 // 오프라인 지도: 나라별 .pmtiles 다운로드/관리 + MapLibre 화면
@@ -245,11 +246,9 @@ Future<String> buildStyle(List<MapPack> packs) async {
   }
   final base = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
 
+  const empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
   final sources = <String, dynamic>{
-    'me': {
-      'type': 'geojson',
-      'data': {'type': 'FeatureCollection', 'features': []},
-    },
+    for (final id in ['me', 'track', 'wpts']) id: {'type': 'geojson', 'data': empty},
   };
   final layers = <Map<String, dynamic>>[
     for (final l in base)
@@ -398,8 +397,40 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
       },
     ];
 
-// 내 위치 (맨 위)
+// 이동 기록 선, 저장한 지점, 내 위치 (맨 위)
 const _meLayers = [
+  {
+    'id': 'track',
+    'type': 'line',
+    'source': 'track',
+    'layout': {'line-cap': 'round', 'line-join': 'round'},
+    'paint': {'line-color': '#f76707', 'line-width': 4, 'line-opacity': 0.9},
+  },
+  {
+    'id': 'wpts',
+    'type': 'circle',
+    'source': 'wpts',
+    'paint': {
+      'circle-radius': 6,
+      'circle-color': '#e8590c',
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 2,
+    },
+  },
+  {
+    'id': 'wpts-label',
+    'type': 'symbol',
+    'source': 'wpts',
+    'layout': {
+      'text-field': ['get', 'name'],
+      'text-font': ['NotoSansMedium'],
+      'text-size': 12,
+      'text-anchor': 'top',
+      'text-offset': [0, 0.8],
+      'text-allow-overlap': true,
+    },
+    'paint': {'text-color': '#c2410c', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5},
+  },
   {
     'id': 'me-acc',
     'type': 'circle',
@@ -421,26 +452,102 @@ const _meLayers = [
 
 // ---------------- 지도 화면 ----------------
 
+CameraPosition? _lastCamera; // 다른 화면에 다녀와도 보던 위치 유지
+
+/// 메인 화면의 버튼들(내 위치, 나침반, 3D)이 지도를 조작하고, 이동 기록·저장한 지점을 지도에 그리는 손잡이
+class MapControl {
+  MapLibreMapController? _ctl;
+  bool _ready = false;
+  final camera = ValueNotifier<CameraPosition?>(_lastCamera);
+  final follow = ValueNotifier<bool>(true); // 내 위치 따라가기 (지도를 손으로 움직이면 해제)
+  final headingUp = ValueNotifier<bool>(false); // 진행 방향이 위로 오게 지도 회전
+  final tilted = ValueNotifier<bool>(false); // 3D (기울여 보기)
+  Map<String, dynamic> _track = _emptyFc, _wpts = _emptyFc;
+
+  static const _emptyFc = <String, dynamic>{'type': 'FeatureCollection', 'features': <dynamic>[]};
+
+  void _attach(MapLibreMapController c) {
+    _ctl = c;
+    _ready = false;
+  }
+
+  void _styleLoaded() {
+    _ready = true;
+    _ctl?.setGeoJsonSource('track', _track);
+    _ctl?.setGeoJsonSource('wpts', _wpts);
+  }
+
+  void recenter(double lat, double lon) {
+    follow.value = true;
+    _ctl?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), math.max(camera.value?.zoom ?? 15, 15)));
+  }
+
+  /// 나침반 방위가 바뀔 때 (진행 방향 위 모드일 때만 지도를 돌림)
+  void onHeading(double deg) {
+    if (headingUp.value) _ctl?.animateCamera(CameraUpdate.bearingTo(deg), duration: const Duration(milliseconds: 200));
+  }
+
+  void toggleHeadingUp(double? heading) {
+    headingUp.value = !headingUp.value;
+    _ctl?.animateCamera(CameraUpdate.bearingTo(headingUp.value ? (heading ?? 0) : 0));
+  }
+
+  void toggleTilt() {
+    tilted.value = !tilted.value;
+    _ctl?.animateCamera(CameraUpdate.tiltTo(tilted.value ? 60 : 0));
+  }
+
+  void setTrack(List<TrackPoint> pts) {
+    _track = {
+      'type': 'FeatureCollection',
+      'features': [
+        if (pts.length >= 2)
+          {
+            'type': 'Feature',
+            'geometry': {
+              'type': 'LineString',
+              'coordinates': [for (final p in pts) [p.lon, p.lat]],
+            },
+            'properties': <String, dynamic>{},
+          }
+      ],
+    };
+    if (_ready) _ctl?.setGeoJsonSource('track', _track);
+  }
+
+  void setWaypoints(List<Waypoint> list) {
+    _wpts = {
+      'type': 'FeatureCollection',
+      'features': [
+        for (final w in list)
+          {
+            'type': 'Feature',
+            'geometry': {'type': 'Point', 'coordinates': [w.lon, w.lat]},
+            'properties': {'name': w.name},
+          }
+      ],
+    };
+    if (_ready) _ctl?.setGeoJsonSource('wpts', _wpts);
+  }
+}
+
 class MapPage extends StatefulWidget {
   final ValueListenable<GnssSnapshot> snap;
-  const MapPage({super.key, required this.snap});
+  final MapControl control;
+  final double topInset; // 화면 위쪽 상태바 높이 (축척·출처 표시 위치)
+  const MapPage({super.key, required this.snap, required this.control, this.topInset = 0});
 
   @override
   State<MapPage> createState() => _MapPageState();
 }
 
-CameraPosition? _lastCamera; // 탭을 오가도 보던 위치 유지
-
 class _MapPageState extends State<MapPage> {
   final store = MapStore.instance;
-  MapLibreMapController? _ctl;
+  MapControl get ctl => widget.control;
   String? _style;
   List<String> _styleIds = [];
-  bool _styleReady = false;
-  bool _follow = true; // 내 위치 따라가기 (지도를 손으로 움직이면 해제)
   bool? _safeMode; // null = 확인 중, true = 지난번 지도를 보다 앱이 죽음
   bool _marked = false;
-  late final _camera = ValueNotifier<CameraPosition?>(_lastCamera);
 
   @override
   void initState() {
@@ -458,7 +565,6 @@ class _MapPageState extends State<MapPage> {
     store.installed.removeListener(_rebuildStyle);
     widget.snap.removeListener(_onSnap);
     if (_marked) store.markMapOpen(false);
-    _camera.dispose();
     super.dispose();
   }
 
@@ -471,25 +577,24 @@ class _MapPageState extends State<MapPage> {
     setState(() {
       _styleIds = ids;
       _style = style;
-      _styleReady = false;
     });
   }
 
   void _onSnap() {
     final s = widget.snap.value;
-    final ctl = _ctl;
-    if (ctl == null || !_styleReady || s.lat == null || s.lon == null) return;
-    ctl.setGeoJsonSource('me', {
+    final c = ctl._ctl;
+    if (c == null || !ctl._ready || s.lat == null || s.lon == null) return;
+    c.setGeoJsonSource('me', {
       'type': 'FeatureCollection',
       'features': [
         {
           'type': 'Feature',
           'geometry': {'type': 'Point', 'coordinates': [s.lon, s.lat]},
-          'properties': {},
+          'properties': <String, dynamic>{},
         }
       ],
     });
-    if (_follow) ctl.animateCamera(CameraUpdate.newLatLng(LatLng(s.lat!, s.lon!)));
+    if (ctl.follow.value) c.animateCamera(CameraUpdate.newLatLng(LatLng(s.lat!, s.lon!)));
   }
 
   CameraPosition _initialCamera() {
@@ -522,101 +627,33 @@ class _MapPageState extends State<MapPage> {
             styleString: style,
             initialCameraPosition: _initialCamera(),
             trackCameraPosition: true,
-            compassEnabled: true,
-            onMapCreated: (c) => _ctl = c,
-            onCameraMove: (cam) => _camera.value = cam,
+            compassEnabled: false, // 나침반은 메인 화면의 버튼이 대신함
+            onMapCreated: ctl._attach,
+            onCameraMove: (cam) => ctl.camera.value = cam,
             onStyleLoadedCallback: () {
-              _styleReady = true;
+              ctl._styleLoaded();
               _onSnap();
             },
             onCameraIdle: () {
-              final cam = _ctl?.cameraPosition;
-              if (cam != null) _lastCamera = _camera.value = cam;
+              final cam = ctl._ctl?.cameraPosition;
+              if (cam != null) _lastCamera = ctl.camera.value = cam;
             },
-            onCameraTrackingDismissed: () => setState(() => _follow = false),
-            onMapClick: (_, __) => setState(() => _follow = false),
+            onCameraTrackingDismissed: () => ctl.follow.value = false,
+            onMapClick: (_, __) => ctl.follow.value = false,
           ),
-          Positioned(
-            right: 12,
-            top: 0,
-            bottom: 0,
-            child: Center(
-              child: Card(
-                color: Colors.white,
-                shape: const StadiumBorder(),
-                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  IconButton(
-                    icon: const Icon(Icons.add, color: Colors.black87),
-                    tooltip: '확대',
-                    onPressed: () => _ctl?.animateCamera(CameraUpdate.zoomIn()),
-                  ),
-                  const SizedBox(width: 28, child: Divider(height: 1)),
-                  IconButton(
-                    icon: const Icon(Icons.remove, color: Colors.black87),
-                    tooltip: '축소',
-                    onPressed: () => _ctl?.animateCamera(CameraUpdate.zoomOut()),
-                  ),
-                ]),
-              ),
-            ),
-          ),
-          Positioned(
-            right: 12,
-            bottom: 40,
-            child: Column(children: [
-              FloatingActionButton.small(
-                heroTag: 'dl',
-                tooltip: '지도 다운로드',
-                onPressed: _openDownloads,
-                child: const Icon(Icons.download_for_offline),
-              ),
-              const SizedBox(height: 10),
-              FloatingActionButton.small(
-                heroTag: 'me',
-                tooltip: '내 위치',
-                backgroundColor: _follow ? Colors.blueAccent : null,
-                onPressed: () {
-                  setState(() => _follow = true);
-                  final s = widget.snap.value;
-                  if (s.lat != null && s.lon != null) {
-                    _ctl?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(s.lat!, s.lon!), 15));
-                  }
-                },
-                child: const Icon(Icons.my_location),
-              ),
-            ]),
-          ),
-          // 축척 막대 (안드로이드 플러그인에는 없어서 직접 그림)
+          // 왼쪽 위: 축척 막대 + 지도 출처 (OpenStreetMap 표시는 필수)
           Positioned(
             left: 12,
-            bottom: 36,
-            child: ValueListenableBuilder<CameraPosition?>(
-              valueListenable: _camera,
-              builder: (_, cam, __) => cam == null ? const SizedBox.shrink() : ScaleBar(camera: cam),
-            ),
-          ),
-          Positioned(
-            left: 8,
-            bottom: 8,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              color: Colors.black54,
-              child: Text('© OpenStreetMap contributors  ·  지도 ${packs.map((p) => p.date).join(', ')}',
-                  style: const TextStyle(fontSize: 10, color: Colors.white70)),
-            ),
-          ),
-          ValueListenableBuilder<GnssSnapshot>(
-            valueListenable: widget.snap,
-            builder: (_, s, __) => s.lat == null
-                ? const Positioned(
-                    left: 0,
-                    right: 0,
-                    top: 8,
-                    child: Center(
-                      child: Chip(label: Text('현재 위치 없음 (GPS 측위 대기)', style: TextStyle(fontSize: 12))),
-                    ),
-                  )
-                : const SizedBox.shrink(),
+            top: widget.topInset + 8,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              ValueListenableBuilder<CameraPosition?>(
+                valueListenable: ctl.camera,
+                builder: (_, cam, __) => cam == null ? const SizedBox.shrink() : ScaleBar(camera: cam),
+              ),
+              const SizedBox(height: 4),
+              Text('© OpenStreetMap  ·  ${packs.map((p) => p.date).join(', ')}',
+                  style: const TextStyle(fontSize: 9, color: Colors.black54)),
+            ]),
           ),
         ]);
       },

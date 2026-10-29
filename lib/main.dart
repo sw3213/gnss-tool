@@ -1,11 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'dop.dart';
+import 'main_screen.dart';
+import 'nav.dart';
 import 'offline_map.dart';
 import 'phone_gnss.dart';
 import 'updater.dart';
@@ -462,9 +467,9 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-enum DataSource { sim, phone } // 다음: ESP32(BLE)
+enum DataSource { sim, phone } // 다음: ESP32(BLE) — 설정에서 고름
 
-const _sourceLabel = {DataSource.sim: '시뮬레이션', DataSource.phone: '폰 GPS'};
+const sourceLabels = {DataSource.sim: '시뮬레이션', DataSource.phone: '폰 GPS'};
 
 class _HomePageState extends State<HomePage> {
   final parser = NmeaParser();
@@ -483,7 +488,12 @@ class _HomePageState extends State<HomePage> {
   PhoneGnss? _phone;
   Timer? _sampler;
   double? _pressure, _temp, _humidity; // 출처가 보낸 최신 센서 값
-  int tab = 0;
+
+  final track = TrackRecorder();
+  final waypoints = WaypointStore();
+  final mapControl = MapControl();
+  final heading = ValueNotifier<double?>(null); // 폰이 향한 방위 (진북 기준)
+  StreamSubscription<dynamic>? _headingSub;
 
   @override
   void initState() {
@@ -491,10 +501,47 @@ class _HomePageState extends State<HomePage> {
     // 앱을 내려도 GPS·센서를 계속 켜 둠 (사용자 선택: 내렸다 돌아올 때 다시 잡는 게 불편).
     // 배터리를 더 쓰며, 안드로이드가 백그라운드 위치·센서 전달을 줄일 수는 있음
     _resume();
+    _loadSource();
+    parser.notifier.addListener(_onPosition);
+    track.points.addListener(() => mapControl.setTrack(track.points.value));
+    waypoints.items.addListener(() => mapControl.setWaypoints(waypoints.items.value));
+    waypoints.load();
+    if (isAndroid) {
+      _headingSub = const EventChannel('gnss_tool/heading').receiveBroadcastStream().listen((d) {
+        heading.value = (d as num).toDouble();
+        mapControl.onHeading(heading.value!);
+      }, onError: (Object _) {}); // 방향 센서 없는 폰: 방위 표시만 안 함
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _showLastCrash();
       if (mounted) checkForUpdate(context);
     });
+  }
+
+  /// 새 위치가 오면 이동 기록에 반영
+  void _onPosition() {
+    final s = parser.notifier.value;
+    if (s.lat != null && s.lon != null && s.fixQ > 0) track.add(s.lat!, s.lon!, s.alt, s.hAcc);
+  }
+
+  // 위치 출처 선택은 앱을 다시 켜도 유지
+  Future<File> _settingsFile() async => File('${(await getApplicationDocumentsDirectory()).path}/settings.json');
+
+  Future<void> _loadSource() async {
+    if (!isAndroid) return;
+    try {
+      final f = await _settingsFile();
+      if (!f.existsSync()) return;
+      final name = (jsonDecode(await f.readAsString()) as Map)['source'] as String?;
+      final s = DataSource.values.where((v) => v.name == name).firstOrNull;
+      if (s != null && s != source && mounted) _switchTo(s);
+    } catch (_) {}
+  }
+
+  Future<void> _saveSource(DataSource s) async {
+    try {
+      await (await _settingsFile()).writeAsString(jsonEncode({'source': s.name}));
+    } catch (_) {}
   }
 
   /// 지난 실행이 비정상 종료였으면 원인을 보여 줌 (캡처해서 보내면 원인 파악 가능)
@@ -532,6 +579,8 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _pause();
+    _headingSub?.cancel();
+    parser.notifier.removeListener(_onPosition);
     super.dispose();
   }
 
@@ -649,82 +698,26 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final pages = <Widget>[
-      if (isAndroid) MapPage(snap: parser.notifier), // MapLibre 네이티브 지도는 안드로이드만
-      SkyPage(snap: parser.notifier),
-      QualityPage(snap: parser.notifier),
-      SensorPage(data: sensors, weather: weather, qnhHistory: qnhHistory),
-      LogPage(log: log),
-    ];
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('GNSS Tool  (${_sourceLabel[source]})'),
-        actions: [
-          if (isAndroid)
-            PopupMenuButton<DataSource>(
-              icon: const Icon(Icons.satellite_alt),
-              tooltip: '데이터 출처',
-              initialValue: source,
-              onSelected: (s) {
-                if (s != source) _switchTo(s);
-              },
-              itemBuilder: (_) => [
-                for (final s in DataSource.values)
-                  PopupMenuItem(value: s, child: Text(_sourceLabel[s]!)),
-              ],
-            ),
-          if (updateSupported)
-            IconButton(
-              icon: const Icon(Icons.system_update),
-              tooltip: '업데이트 확인',
-              onPressed: () => checkForUpdate(context, manual: true),
-            ),
-        ],
-      ),
-      body: Column(children: [
-        ValueListenableBuilder<String?>(
-          valueListenable: alert,
-          builder: (_, msg, __) => msg == null
-              ? const SizedBox.shrink()
-              : Container(
-                  width: double.infinity,
-                  color: Colors.red.shade900,
-                  padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
-                  child: Row(children: [
-                    const Icon(Icons.thunderstorm, size: 20),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(msg, style: const TextStyle(fontSize: 14))),
-                    TextButton(onPressed: () => alert.value = null, child: const Text('확인')),
-                  ]),
-                ),
-        ),
-        ValueListenableBuilder<String?>(
-          valueListenable: notice,
-          builder: (_, msg, __) => msg == null
-              ? const SizedBox.shrink()
-              : Container(
-                  width: double.infinity,
-                  color: Colors.blueGrey.shade800,
-                  padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
-                  child: Row(children: [
-                    Expanded(child: Text(msg, style: const TextStyle(fontSize: 13))),
-                    TextButton(onPressed: () => _switchTo(source), child: const Text('다시 시도')),
-                  ]),
-                ),
-        ),
-        Expanded(child: pages[tab]),
-      ]),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: tab,
-        onDestinationSelected: (i) => setState(() => tab = i),
-        destinations: [
-          if (isAndroid) const NavigationDestination(icon: Icon(Icons.map), label: '지도'),
-          const NavigationDestination(icon: Icon(Icons.public), label: '스카이플롯'),
-          NavigationDestination(icon: Icon(Icons.speed), label: '품질'),
-          NavigationDestination(icon: Icon(Icons.show_chart), label: '센서'),
-          NavigationDestination(icon: Icon(Icons.terminal), label: 'NMEA'),
-        ],
-      ),
+    return MainScreen(
+      snap: parser.notifier,
+      sensors: sensors,
+      weather: weather,
+      qnhHistory: qnhHistory,
+      log: log,
+      notice: notice,
+      alert: alert,
+      heading: heading,
+      sourceLabel: sourceLabels[source]!,
+      map: mapControl,
+      track: track,
+      waypoints: waypoints,
+      source: source,
+      onSource: (s) {
+        if (s != source) _switchTo(s);
+        _saveSource(s);
+      },
+      onRetrySource: () => _switchTo(source),
+      onDismissAlert: () => alert.value = null,
     );
   }
 }
@@ -1053,8 +1046,9 @@ class LineChartPainter<T> extends CustomPainter {
   final int digits;
   final double minSpan; // 잡음이 과장되지 않도록 세로축 최소 범위
   final int window; // 가로축에 들어가는 점 개수
+  final bool labels; // 위·아래 끝 값 표시 (작은 그래프에선 끔)
   LineChartPainter(this.data, this.value, this.color, this.digits, this.minSpan,
-      {this.second, this.window = sensorWindow})
+      {this.second, this.window = sensorWindow, this.labels = true})
       : super(repaint: data);
 
   void _text(Canvas c, String s, Offset at) {
@@ -1115,6 +1109,7 @@ class LineChartPainter<T> extends CustomPainter {
     final p1 = line(value);
     if (p1 != null) canvas.drawPath(p1, stroke..color = color);
 
+    if (!labels) return;
     _text(canvas, fmt(hi, digits), const Offset(4, 2));
     _text(canvas, fmt(lo, digits), Offset(4, size.height - 14));
   }

@@ -178,6 +178,11 @@ class MainActivity : FlutterActivity() {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink) = startPressure(events)
             override fun onCancel(arguments: Any?) = stopPressure()
         })
+
+        EventChannel(messenger, "gnss_tool/heading").setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink) = startHeading(events)
+            override fun onCancel(arguments: Any?) = stopHeading()
+        })
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -280,6 +285,65 @@ class MainActivity : FlutterActivity() {
     private fun stopPressure() {
         pressureListener?.let { sm.unregisterListener(it) }
         pressureListener = null
+    }
+
+    // ---------------- 나침반 ----------------
+    // 회전 벡터 센서(가속도+자기+자이로 융합)로 폰 윗변이 가리키는 방위. 자북 기준이라
+    // 마지막 위치의 자기 편각(한국 약 -8~-9°)을 더해 진북(지도 북쪽) 기준으로 보냄
+
+    private var headingListener: SensorEventListener? = null
+
+    @SuppressLint("MissingPermission")
+    private fun declination(): Float {
+        if (!hasFineLocation()) return 0f
+        val loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) ?: return 0f
+        return android.hardware.GeomagneticField(
+            loc.latitude.toFloat(), loc.longitude.toFloat(), loc.altitude.toFloat(), System.currentTimeMillis()
+        ).declination
+    }
+
+    private fun startHeading(events: EventChannel.EventSink) {
+        val sensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        if (sensor == null) {
+            events.error("NO_SENSOR", "방향 센서 없음", null)
+            return
+        }
+        val listener = object : SensorEventListener {
+            val rot = FloatArray(9)
+            val orient = FloatArray(3)
+            var decl = declination()
+            var declAt = System.currentTimeMillis()
+            var lastSent = 0L
+            var lastDeg = -1000.0
+
+            override fun onSensorChanged(e: SensorEvent) {
+                SensorManager.getRotationMatrixFromVector(rot, e.values)
+                SensorManager.getOrientation(rot, orient)
+                val now = System.currentTimeMillis()
+                if (now - declAt > 60_000) {
+                    decl = declination()
+                    declAt = now
+                }
+                val deg = ((Math.toDegrees(orient[0].toDouble()) + decl + 360) % 360)
+                var diff = Math.abs(deg - lastDeg)
+                if (diff > 180) diff = 360 - diff
+                // 초당 최대 10번, 1° 이상 바뀔 때만 (화면 갱신·배터리 절약)
+                if (now - lastSent >= 100 && diff >= 1) {
+                    events.success(deg)
+                    lastSent = now
+                    lastDeg = deg
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        headingListener = listener
+        sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI, main)
+    }
+
+    private fun stopHeading() {
+        headingListener?.let { sm.unregisterListener(it) }
+        headingListener = null
     }
 
     companion object {
