@@ -28,7 +28,19 @@ void main() {
 
     // 지도 레이어는 내려받은 지도 소스를 가리키고, 우리 레이어가 들어가 있어야 함
     final ids = [for (final l in style['layers'] as List) (l as Map)['id']];
-    expect(ids, containsAll(['m_kr-buildings', 'm_kr-pois', 'm_kr-trails', 'me']));
+    expect(ids, containsAll(['m_kr-buildings', 'm_kr-pois', 'm_kr-trails', 'm_kr-peaks', 'm_kr-area-names', 'me']));
     expect(ids.first, 'background');
+
+    // 장소 아이콘이 2단계 일찍 보이도록 바뀌었는지 (원본 스타일 형식이 바뀌면 여기서 잡힘)
+    final pois = (style['layers'] as List).cast<Map>().firstWhere((l) => l['id'] == 'm_kr-pois');
+    expect(jsonEncode(pois['filter']), contains('["-",["get","min_zoom"],2]'));
+  });
+
+  test('scale bar picks a round length that fits', () {
+    // 원주(위도 37.3), 확대 15: dp당 약 1.9 m -> 100 dp 안에 100 m
+    final mpp = ScaleBar.metersPerDp(37.3, 15);
+    expect(mpp, closeTo(1.9, 0.1));
+    expect(ScaleBar.niceLength(mpp), 100);
+    expect(ScaleBar.niceLength(ScaleBar.metersPerDp(37.3, 10)), 5000);
   });
 }

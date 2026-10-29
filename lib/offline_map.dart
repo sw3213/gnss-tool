@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -266,7 +267,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
       if (l['source'] == null) continue;
       // 라벨(번지) 바로 앞에 우리 레이어를 끼워 넣어 도로 위, 글자 아래에 그려지게 함
       if (l['id'] == 'address_label') layers.addAll(_extraLayers(s));
-      layers.add({...l, 'id': '$s-${l['id']}', 'source': s});
+      layers.add(_tweak({...l, 'id': '$s-${l['id']}', 'source': s}, l['id'] as String));
     }
   }
   layers.addAll(_meLayers);
@@ -279,6 +280,33 @@ Future<String> buildStyle(List<MapPack> packs) async {
     'sources': sources,
     'layers': layers,
   });
+}
+
+/// 기본 스타일은 꽤 확대해야 정보가 보임 -> MAPS.ME처럼 덜 확대해도 보이게 조정
+Map<String, dynamic> _tweak(Map<String, dynamic> l, String id) {
+  switch (id) {
+    case 'pois':
+      // 장소마다 "이 확대 단계부터 보임"(min_zoom)이 있음. 2단계 일찍 보이게 하고,
+      // 봉우리는 높이를 함께 보여 주는 별도 레이어(peaks)로 그림
+      final f = jsonEncode(l['filter']).replaceAll('["+",["get","min_zoom"],0]', '["-",["get","min_zoom"],2]');
+      return {
+        ...l,
+        'filter': [
+          'all',
+          jsonDecode(f),
+          ['!=', ['get', 'kind'], 'peak'],
+        ],
+        'layout': {
+          ...(l['layout'] as Map<String, dynamic>),
+          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 10, 17, 11, 19, 16],
+        },
+      };
+    case 'address_label':
+      return {...l, 'minzoom': 17}; // 번지: 18 -> 17
+    case 'roads_labels_minor':
+      return {...l, 'minzoom': 14}; // 골목 이름: 15 -> 14
+  }
+  return l;
 }
 
 List<Map<String, dynamic>> _extraLayers(String s) => [
@@ -314,6 +342,59 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
           'text-size': 11,
         },
         'paint': {'text-color': '#6b6258', 'text-halo-color': '#ffffff', 'text-halo-width': 1},
+      },
+      // 아파트 단지·학교·공원 등 구역 이름 ("구곡청솔1차아파트")
+      {
+        'id': '$s-area-names',
+        'type': 'symbol',
+        'source': s,
+        'source-layer': 'landuse',
+        'minzoom': 14,
+        'filter': [
+          'all',
+          ['has', 'name'],
+          [
+            'in',
+            ['get', 'kind'],
+            ['literal', ['residential', 'school', 'university', 'college', 'hospital', 'park', 'cemetery', 'military', 'industrial', 'commercial']],
+          ],
+        ],
+        'layout': {
+          'text-field': ['coalesce', ['get', 'name:ko'], ['get', 'name']],
+          'text-font': ['NotoSansRegular'],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 10, 17, 12],
+          'text-max-width': 8,
+        },
+        'paint': {'text-color': '#8a8076', 'text-halo-color': '#ffffff', 'text-halo-width': 1},
+      },
+      // 산봉우리: ▲ 아이콘 + 이름 + 높이 (MAPS.ME "231 m 옥녀봉")
+      {
+        'id': '$s-peaks',
+        'type': 'symbol',
+        'source': s,
+        'source-layer': 'pois',
+        'minzoom': 11,
+        'filter': ['==', ['get', 'kind'], 'peak'],
+        'layout': {
+          'icon-image': 'peak',
+          'text-field': [
+            'case',
+            ['any', ['has', 'elevation'], ['has', 'ele']],
+            [
+              'concat',
+              ['coalesce', ['get', 'name:ko'], ['get', 'name'], ''],
+              '\n',
+              ['to-string', ['round', ['to-number', ['coalesce', ['get', 'elevation'], ['get', 'ele']]]]],
+              ' m',
+            ],
+            ['coalesce', ['get', 'name:ko'], ['get', 'name'], ''],
+          ],
+          'text-font': ['NotoSansRegular'],
+          'text-size': 11,
+          'text-anchor': 'top',
+          'text-offset': [0, 0.9],
+        },
+        'paint': {'text-color': '#4d4a3a', 'text-halo-color': '#ffffff', 'text-halo-width': 1.2},
       },
     ];
 
@@ -359,6 +440,7 @@ class _MapPageState extends State<MapPage> {
   bool _follow = true; // 내 위치 따라가기 (지도를 손으로 움직이면 해제)
   bool? _safeMode; // null = 확인 중, true = 지난번 지도를 보다 앱이 죽음
   bool _marked = false;
+  late final _camera = ValueNotifier<CameraPosition?>(_lastCamera);
 
   @override
   void initState() {
@@ -376,6 +458,7 @@ class _MapPageState extends State<MapPage> {
     store.installed.removeListener(_rebuildStyle);
     widget.snap.removeListener(_onSnap);
     if (_marked) store.markMapOpen(false);
+    _camera.dispose();
     super.dispose();
   }
 
@@ -440,15 +523,15 @@ class _MapPageState extends State<MapPage> {
             initialCameraPosition: _initialCamera(),
             trackCameraPosition: true,
             compassEnabled: true,
-            scaleControlEnabled: true, // 축척 막대 (왼쪽 아래)
             onMapCreated: (c) => _ctl = c,
+            onCameraMove: (cam) => _camera.value = cam,
             onStyleLoadedCallback: () {
               _styleReady = true;
               _onSnap();
             },
             onCameraIdle: () {
               final cam = _ctl?.cameraPosition;
-              if (cam != null) _lastCamera = cam;
+              if (cam != null) _lastCamera = _camera.value = cam;
             },
             onCameraTrackingDismissed: () => setState(() => _follow = false),
             onMapClick: (_, __) => setState(() => _follow = false),
@@ -502,6 +585,15 @@ class _MapPageState extends State<MapPage> {
                 child: const Icon(Icons.my_location),
               ),
             ]),
+          ),
+          // 축척 막대 (안드로이드 플러그인에는 없어서 직접 그림)
+          Positioned(
+            left: 12,
+            bottom: 36,
+            child: ValueListenableBuilder<CameraPosition?>(
+              valueListenable: _camera,
+              builder: (_, cam, __) => cam == null ? const SizedBox.shrink() : ScaleBar(camera: cam),
+            ),
           ),
           Positioned(
             left: 8,
@@ -585,6 +677,48 @@ class _MapPageState extends State<MapPage> {
           ]),
         ),
       );
+}
+
+/// 축척 막대: 화면 100 dp 안에 들어가는 1·2·5×10ⁿ m 길이를 골라 표시.
+/// MapLibre는 확대 단계 z에서 지구 둘레를 512×2^z dp로 그림 -> dp당 미터 = 둘레·cos(위도) / (512·2^z)
+class ScaleBar extends StatelessWidget {
+  final CameraPosition camera;
+  const ScaleBar({super.key, required this.camera});
+
+  static double metersPerDp(double lat, double zoom) =>
+      40075016.686 * math.cos(lat * math.pi / 180) / (512 * math.pow(2, zoom));
+
+  /// [maxDp] 이하로 들어가는 보기 좋은 길이 (m)
+  static double niceLength(double mpp, {double maxDp = 100}) {
+    final maxM = mpp * maxDp;
+    final p = math.pow(10, (math.log(maxM) / math.ln10).floor()).toDouble();
+    for (final k in [5, 2, 1]) {
+      if (k * p <= maxM) return k * p;
+    }
+    return p;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final mpp = metersPerDp(camera.target.latitude, camera.zoom);
+    final m = niceLength(mpp);
+    final label = m >= 1000 ? '${(m / 1000).toStringAsFixed(m >= 10000 ? 0 : (m % 1000 == 0 ? 0 : 1))} km' : '${m.round()} m';
+    const style = TextStyle(fontSize: 11, color: Colors.black87, fontWeight: FontWeight.w600);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      Text(label, style: style),
+      Container(
+        width: m / mpp,
+        height: 5,
+        decoration: const BoxDecoration(
+          border: Border(
+            left: BorderSide(width: 2),
+            right: BorderSide(width: 2),
+            bottom: BorderSide(width: 2),
+          ),
+        ),
+      ),
+    ]);
+  }
 }
 
 // ---------------- 지도 다운로드 화면 ----------------
