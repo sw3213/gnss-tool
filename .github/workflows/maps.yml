@@ -1,0 +1,73 @@
+name: Build map packages
+
+# 나라별 오프라인 지도(.pmtiles)를 Protomaps 일일 빌드(OpenStreetMap)에서 잘라
+# Release "maps"에 올린다. 앱의 지도 다운로드 화면은 maps/catalog.json을 읽음.
+# Protomaps는 앱이 자기 빌드를 직접 쓰는 것(hotlink)을 권하지 않으므로 우리 Release에 복사해 둠.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 1 * *' # 매월 1일
+
+permissions:
+  contents: write
+
+jobs:
+  maps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pmtiles CLI
+        run: |
+          curl -sfL -o pmtiles.tar.gz \
+            https://github.com/protomaps/go-pmtiles/releases/download/v1.31.2/go-pmtiles_1.31.2_Linux_x86_64.tar.gz
+          tar xzf pmtiles.tar.gz pmtiles
+          ./pmtiles version
+
+      - name: Find latest Protomaps build
+        id: build
+        run: |
+          for d in $(seq 0 14); do
+            date=$(date -u -d "-$d day" +%Y%m%d)
+            if curl -sfI "https://build.protomaps.com/$date.pmtiles" >/dev/null; then
+              echo "date=$date" >> "$GITHUB_OUTPUT"
+              echo "using build $date"
+              exit 0
+            fi
+          done
+          echo "::error::no Protomaps build found in the last 14 days"
+          exit 1
+
+      - name: Extract regions
+        env:
+          BUILD: ${{ steps.build.outputs.date }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p out
+          echo '[]' > out/catalog.json
+          jq -c '.[]' maps/regions.json | while read -r row; do
+            id=$(echo "$row" | jq -r .id)
+            bbox=$(echo "$row" | jq -r '.bbox | join(",")')
+            ./pmtiles extract "https://build.protomaps.com/$BUILD.pmtiles" "out/$id.pmtiles" \
+              --bbox="$bbox" --maxzoom=15 --download-threads=8
+            size=$(stat -c %s "out/$id.pmtiles")
+            date="${BUILD:0:4}-${BUILD:4:2}-${BUILD:6:2}"
+            url="https://github.com/$REPO/releases/download/maps/$id.pmtiles"
+            jq --argjson r "$row" --arg url "$url" --arg date "$date" --argjson size "$size" \
+              '. + [$r + {url: $url, date: $date, size: $size, maxzoom: 15}]' \
+              out/catalog.json > out/tmp.json && mv out/tmp.json out/catalog.json
+          done
+          cat out/catalog.json
+          ls -la out
+
+      - name: Publish to release "maps"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # prerelease + latest=false: 앱 업데이트 확인(releases/latest)이 이 Release를 보지 않게
+          gh release view maps >/dev/null 2>&1 || \
+            gh release create maps --prerelease --latest=false \
+              --title "오프라인 지도" \
+              --notes "나라별 오프라인 지도. 데이터 © OpenStreetMap contributors (ODbL), 타일 스키마 Protomaps."
+          gh release upload maps out/*.pmtiles out/catalog.json --clobber
