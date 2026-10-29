@@ -13,5 +13,9 @@ dependencies:
   ota_update: ^7.1.0
   package_info_plus: ^10.2.2
 
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
 flutter:
   uses-material-design: true

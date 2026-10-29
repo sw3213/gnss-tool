@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'phone_gnss.dart';
 import 'updater.dart';
 
 void main() => runApp(const GnssApp());
@@ -25,18 +26,20 @@ class GnssApp extends StatelessWidget {
 // ============================================================
 
 class Sat {
-  final String sys; // GPS / GLO / GAL / BDS
+  final String sys; // GPS / GLO / GAL / BDS / QZS
   final int prn;
   final int? elev;
   final int? az;
   final int? snr; // C/N0 (dB-Hz), null = 추적 안 함
   final bool used;
-  const Sat(this.sys, this.prn, this.elev, this.az, this.snr, {this.used = false});
+  final bool l5; // L5/E5a/B2a 신호도 수신 중 (듀얼밴드)
+  const Sat(this.sys, this.prn, this.elev, this.az, this.snr, {this.used = false, this.l5 = false});
 }
 
 class GnssSnapshot {
   final List<Sat> sats;
   final double? pdop, hdop, vdop, lat, lon, alt;
+  final double? hAcc, vAcc; // 수신기가 추정한 오차 (m, 폰 GPS만 제공)
   final int fixQ, ggaSats, dropped, badChecksum;
   const GnssSnapshot({
     this.sats = const [],
@@ -46,6 +49,8 @@ class GnssSnapshot {
     this.lat,
     this.lon,
     this.alt,
+    this.hAcc,
+    this.vAcc,
     this.fixQ = 0,
     this.ggaSats = 0,
     this.dropped = 0,
@@ -55,19 +60,25 @@ class GnssSnapshot {
 
 class SensorSample {
   final DateTime t;
-  final double pressure; // hPa (BMP280)
-  final double temp; // °C (AHT20)
-  final double humidity; // %RH (AHT20)
+  // null = 해당 센서 없음 (예: 폰에는 온·습도 센서가 없음)
+  final double? pressure; // hPa (BMP280 / 폰 기압계)
+  final double? temp; // °C (AHT20)
+  final double? humidity; // %RH (AHT20)
   final double? gnssAlt; // m, 같은 시각 GGA 고도
   const SensorSample(this.t, this.pressure, this.temp, this.humidity, this.gnssAlt);
 
   // 표준대기(1013.25 hPa) 기준 기압 고도. 해면기압 보정은 폭풍 경보 단계에서
-  double get baroAlt => 44330 * (1 - pow(pressure / 1013.25, 1 / 5.255).toDouble());
+  double? get baroAlt {
+    final p = pressure;
+    return p == null ? null : 44330 * (1 - pow(p / 1013.25, 1 / 5.255).toDouble());
+  }
 }
 
 const sensorWindow = 300; // 최근 5분 (1초 간격)
 
-const sysList = ['GPS', 'GLO', 'GAL', 'BDS'];
+const sysList = ['GPS', 'GLO', 'GAL', 'BDS', 'QZS'];
+
+bool get isAndroid => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
 Color sysColor(String sys) {
   switch (sys) {
@@ -79,6 +90,8 @@ Color sysColor(String sys) {
       return Colors.amberAccent;
     case 'BDS':
       return Colors.purpleAccent;
+    case 'QZS':
+      return Colors.lightGreenAccent;
     default:
       return Colors.white54;
   }
@@ -95,6 +108,9 @@ String sysOf(String talker) {
     case 'GB':
     case 'BD':
       return 'BDS';
+    case 'GQ':
+    case 'QZ':
+      return 'QZS';
     default:
       return talker;
   }
@@ -142,13 +158,26 @@ class _Cycle {
 }
 
 class NmeaParser {
-  final Map<String, List<Sat>> _committed = {}; // talker -> 완성된 위성 목록
-  final Map<String, _Cycle> _cur = {}; // talker -> 수집 중인 사이클
+  final Map<String, List<Sat>> _committed = {}; // talker+신호ID -> 완성된 위성 목록
+  final Map<String, _Cycle> _cur = {}; // talker+신호ID -> 수집 중인 사이클
   final Map<String, Set<int>> _usedBySys = {};
-  double? pdop, hdop, vdop, alt, lat, lon;
+  double? pdop, hdop, vdop, alt, lat, lon, hAcc, vAcc;
   int fixQ = 0, ggaSats = 0, dropped = 0, badChecksum = 0;
 
+  // 폰 GPS처럼 위성 목록을 따로(GnssStatus) 받는 경우 GSV 대신 이것을 씀
+  List<Sat>? externalSats;
+
   final notifier = ValueNotifier<GnssSnapshot>(const GnssSnapshot());
+
+  void reset() {
+    _committed.clear();
+    _cur.clear();
+    _usedBySys.clear();
+    pdop = hdop = vdop = alt = lat = lon = hAcc = vAcc = null;
+    fixQ = ggaSats = dropped = badChecksum = 0;
+    externalSats = null;
+    publish();
+  }
 
   void feed(String raw) {
     final line = raw.trim();
@@ -171,26 +200,29 @@ class NmeaParser {
         break;
       case 'GGA':
         _gga(f);
-        _publish(); // GGA를 에포크(1초 묶음)의 끝으로 간주
+        publish(); // GGA를 에포크(1초 묶음)의 끝으로 간주
         break;
     }
   }
 
   // GSV 병합: 1번 문장에서 시작, 번호가 연속일 때만 이어 붙이고,
-  // 마지막 문장이 오면 해당 talker의 위성 목록을 통째로 교체(commit)한다.
+  // 마지막 문장이 오면 해당 talker(+신호)의 위성 목록을 통째로 교체(commit)한다.
+  // NMEA 4.10+ 듀얼밴드 수신기는 L1, L5를 별도 사이클로 보내며 끝에 신호 ID가 붙음
+  // -> 사이클을 talker+신호ID로 구분해야 L5 사이클이 L1 목록을 덮어쓰지 않음
   void _gsv(String talker, List<String> f) {
     if (f.length < 4) return;
     final total = int.tryParse(f[1]);
     final seq = int.tryParse(f[2]);
     if (total == null || seq == null) return;
+    final key = (f.length - 4) % 4 == 1 ? '$talker/${f.last}' : talker;
 
-    _Cycle? c = _cur[talker];
+    _Cycle? c = _cur[key];
     if (seq == 1) {
       if (c != null) dropped++; // 이전 사이클이 미완성인 채로 새로 시작됨
       c = _Cycle(total);
-      _cur[talker] = c;
+      _cur[key] = c;
     } else if (c == null || seq != c.next || total != c.total) {
-      _cur.remove(talker); // 불연속 -> 사이클 폐기
+      _cur.remove(key); // 불연속 -> 사이클 폐기
       dropped++;
       return;
     } else {
@@ -205,8 +237,8 @@ class NmeaParser {
           int.tryParse(f[i + 3])));
     }
     if (seq == total) {
-      _committed[talker] = c.sats;
-      _cur.remove(talker);
+      _committed[key] = c.sats;
+      _cur.remove(key);
     }
   }
 
@@ -245,16 +277,25 @@ class NmeaParser {
     return (hemi == 'S' || hemi == 'W') ? -deg : deg;
   }
 
-  void _publish() {
-    final all = <Sat>[];
-    for (final list in _committed.values) {
-      for (final s in list) {
-        all.add(Sat(s.sys, s.prn, s.elev, s.az, s.snr,
-            used: _usedBySys[s.sys]?.contains(s.prn) ?? false));
+  void publish() {
+    var sats = externalSats;
+    if (sats == null) {
+      // 여러 신호(L1/L5) 사이클에 같은 위성이 있으면 하나로 합치고 더 센 신호를 씀
+      final bySat = <String, Sat>{};
+      for (final list in _committed.values) {
+        for (final s in list) {
+          final prev = bySat['${s.sys}${s.prn}'];
+          if (prev != null && (prev.snr ?? 0) >= (s.snr ?? 0)) continue;
+          bySat['${s.sys}${s.prn}'] = Sat(s.sys, s.prn, s.elev, s.az, s.snr,
+              used: _usedBySys[s.sys]?.contains(s.prn) ?? false);
+        }
       }
+      sats = bySat.values.toList();
     }
     notifier.value = GnssSnapshot(
-      sats: all,
+      sats: sats,
+      hAcc: hAcc,
+      vAcc: vAcc,
       pdop: pdop,
       hdop: hdop,
       vdop: vdop,
@@ -417,35 +458,105 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
+enum DataSource { sim, phone } // 다음: ESP32(BLE)
+
+const _sourceLabel = {DataSource.sim: '시뮬레이션', DataSource.phone: '폰 GPS'};
+
 class _HomePageState extends State<HomePage> {
   final parser = NmeaParser();
   final log = ValueNotifier<List<String>>([]);
   final sensors = ValueNotifier<List<SensorSample>>([]);
+  final notice = ValueNotifier<String?>(null); // 권한 거부, GPS 꺼짐 등 안내
   final _buf = <String>[];
-  late final GnssSimulator sim;
+  DataSource source = isAndroid ? DataSource.phone : DataSource.sim;
+  GnssSimulator? _sim;
+  PhoneGnss? _phone;
+  Timer? _sampler;
+  double? _pressure, _temp, _humidity; // 출처가 보낸 최신 센서 값
   int tab = 0;
 
   @override
   void initState() {
     super.initState();
-    sim = GnssSimulator((line) {
-      parser.feed(line);
-      _buf.add(line);
-      if (_buf.length > 60) _buf.removeRange(0, _buf.length - 60);
-      if (line.contains('GGA')) log.value = List.of(_buf);
-    }, onSensor: (p, t, h) {
-      final next = [...sensors.value, SensorSample(DateTime.now(), p, t, h, parser.notifier.value.alt)];
-      if (next.length > sensorWindow) next.removeRange(0, next.length - sensorWindow);
-      sensors.value = next;
-    });
-    sim.start();
+    _start();
+    // 센서 차트는 출처와 무관하게 1초마다 최신 값을 한 점씩 기록
+    _sampler = Timer.periodic(const Duration(seconds: 1), (_) => _sample());
     WidgetsBinding.instance.addPostFrameCallback((_) => checkForUpdate(context));
   }
 
   @override
   void dispose() {
-    sim.stop();
+    _stop();
+    _sampler?.cancel();
     super.dispose();
+  }
+
+  void _onLine(String line) {
+    parser.feed(line);
+    _buf.add(line);
+    if (_buf.length > 60) _buf.removeRange(0, _buf.length - 60);
+    if (line.contains('GGA')) log.value = List.of(_buf);
+  }
+
+  void _sample() {
+    final next = [
+      ...sensors.value,
+      SensorSample(DateTime.now(), _pressure, _temp, _humidity, parser.notifier.value.alt),
+    ];
+    if (next.length > sensorWindow) next.removeRange(0, next.length - sensorWindow);
+    sensors.value = next;
+  }
+
+  void _start() {
+    notice.value = null;
+    switch (source) {
+      case DataSource.sim:
+        _sim = GnssSimulator(_onLine, onSensor: (p, t, h) {
+          _pressure = p;
+          _temp = t;
+          _humidity = h;
+        })
+          ..start();
+      case DataSource.phone:
+        notice.value = '위성 신호를 찾는 중... 실외나 창가에서 더 빨리 잡힙니다.';
+        _phone = PhoneGnss(
+          onLine: _onLine,
+          onSats: (sats) {
+            if (sats.any((s) => s.snr != null) && notice.value != null) notice.value = null;
+            parser.externalSats = sats;
+            parser.publish();
+          },
+          onAccuracy: (h, v) {
+            parser.hAcc = h;
+            parser.vAcc = v;
+          },
+          onPressure: (p) => _pressure = p,
+          onGnssError: (code) => notice.value = switch (code) {
+            'PERMISSION_DENIED' => '정확한 위치 권한이 필요합니다. [다시 시도]를 누르거나 설정 > 애플리케이션에서 허용해 주세요.',
+            'GPS_OFF' => '폰의 위치(GPS)가 꺼져 있습니다. 켠 뒤 [다시 시도]를 눌러 주세요.',
+            _ => 'GPS 오류: $code',
+          },
+          onNoBarometer: () {}, // 기압 null로 남음 -> 센서 탭에 "센서 없음" 표시
+        )..start();
+    }
+  }
+
+  void _stop() {
+    _sim?.stop();
+    _phone?.stop();
+    _sim = null;
+    _phone = null;
+    _pressure = _temp = _humidity = null;
+  }
+
+  void _switchTo(DataSource s) {
+    _stop();
+    parser.reset();
+    _buf.clear();
+    log.value = [];
+    sensors.value = [];
+    setState(() => source = s);
+    _start();
   }
 
   @override
@@ -458,8 +569,21 @@ class _HomePageState extends State<HomePage> {
     ];
     return Scaffold(
       appBar: AppBar(
-        title: const Text('GNSS Tool  (시뮬레이션)'),
+        title: Text('GNSS Tool  (${_sourceLabel[source]})'),
         actions: [
+          if (isAndroid)
+            PopupMenuButton<DataSource>(
+              icon: const Icon(Icons.satellite_alt),
+              tooltip: '데이터 출처',
+              initialValue: source,
+              onSelected: (s) {
+                if (s != source) _switchTo(s);
+              },
+              itemBuilder: (_) => [
+                for (final s in DataSource.values)
+                  PopupMenuItem(value: s, child: Text(_sourceLabel[s]!)),
+              ],
+            ),
           if (updateSupported)
             IconButton(
               icon: const Icon(Icons.system_update),
@@ -468,7 +592,23 @@ class _HomePageState extends State<HomePage> {
             ),
         ],
       ),
-      body: pages[tab],
+      body: Column(children: [
+        ValueListenableBuilder<String?>(
+          valueListenable: notice,
+          builder: (_, msg, __) => msg == null
+              ? const SizedBox.shrink()
+              : Container(
+                  width: double.infinity,
+                  color: Colors.blueGrey.shade800,
+                  padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+                  child: Row(children: [
+                    Expanded(child: Text(msg, style: const TextStyle(fontSize: 13))),
+                    TextButton(onPressed: () => _switchTo(source), child: const Text('다시 시도')),
+                  ]),
+                ),
+        ),
+        Expanded(child: pages[tab]),
+      ]),
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
         onDestinationSelected: (i) => setState(() => tab = i),
@@ -613,6 +753,10 @@ class QualityPage extends StatelessWidget {
                   const SizedBox(height: 6),
                   Text('HDOP ${fmt(s.hdop)}   VDOP ${fmt(s.vdop)}   PDOP ${fmt(s.pdop)}'),
                   Text('위치 ${fmt(s.lat, 5)}, ${fmt(s.lon, 5)}   고도 ${fmt(s.alt)} m'),
+                  if (s.hAcc != null)
+                    Text('예상 오차 (수신기 추정): 수평 ±${fmt(s.hAcc)} m   수직 ±${fmt(s.vAcc)} m'),
+                  if (s.sats.any((x) => x.l5))
+                    Text('듀얼밴드: L5 신호 수신 위성 ${s.sats.where((x) => x.l5).length}개'),
                   Text('파서 통계: 병합 폐기 ${s.dropped}회 / 체크섬 오류 ${s.badChecksum}회',
                       style: const TextStyle(color: Colors.white54, fontSize: 12)),
                 ]),
@@ -718,6 +862,25 @@ class SensorPage extends StatelessWidget {
             second: (s) => s.gnssAlt, legend: '노란 선 = 기압 고도 / 회색 선 = GNSS 고도'),
         const Text('최근 5분, 1초 간격',
             textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
+        ValueListenableBuilder<List<SensorSample>>(
+          valueListenable: data,
+          builder: (_, list, __) {
+            if (list.isEmpty) return const SizedBox.shrink();
+            final last = list.last;
+            final missing = [
+              if (last.pressure == null) '기압',
+              if (last.temp == null) '온도',
+              if (last.humidity == null) '습도',
+            ];
+            if (missing.isEmpty) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('${missing.join('·')}: 이 기기에 센서 없음 (ESP32 장치 연결 후 표시)',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white54, fontSize: 12)),
+            );
+          },
+        ),
       ],
     );
   }
@@ -757,6 +920,10 @@ class LineChartPainter extends CustomPainter {
     final all = [
       for (final s in list) ...[value(s), second?.call(s)]
     ].whereType<double>();
+    if (all.isEmpty) {
+      _text(canvas, '센서 없음', const Offset(6, 6));
+      return;
+    }
     var lo = all.reduce(min), hi = all.reduce(max);
     if (hi - lo < minSpan) {
       final mid = (hi + lo) / 2;
