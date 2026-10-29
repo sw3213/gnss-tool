@@ -31,7 +31,7 @@ Future<AppRelease?> findUpdate() async {
   if (res.statusCode == 404) return null; // 아직 Release 없음
   if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
 
-  final j = jsonDecode(res.body) as Map<String, dynamic>;
+  final j = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>; // 한글 릴리스 노트
   final tag = j['tag_name'] as String? ?? '';
   final build = int.tryParse(RegExp(r'(\d+)$').firstMatch(tag)?.group(1) ?? '');
   if (build == null || build <= mine) return null;

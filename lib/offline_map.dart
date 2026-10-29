@@ -74,7 +74,9 @@ class MapStore {
   Future<List<MapPack>> fetchCatalog() async {
     final res = await http.get(Uri.parse(_catalogUrl)).timeout(const Duration(seconds: 15));
     if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
-    return [for (final j in jsonDecode(res.body) as List) MapPack.fromJson(j as Map<String, dynamic>)];
+    // GitHub Release 파일은 charset 없이 와서 res.body가 Latin-1로 읽힘 -> 한글 깨짐. UTF-8로 직접 해석
+    final list = jsonDecode(utf8.decode(res.bodyBytes)) as List;
+    return [for (final j in list) MapPack.fromJson(j as Map<String, dynamic>)];
   }
 
   /// 임시 파일(.part)에 받은 뒤 끝나면 이름을 바꿈 -> 중간에 끊겨도 깨진 지도가 남지 않음
