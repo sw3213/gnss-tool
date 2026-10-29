@@ -252,7 +252,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
 
   const empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
   final sources = <String, dynamic>{
-    for (final id in ['me', 'track', 'wpts']) id: {'type': 'geojson', 'data': empty},
+    for (final id in ['me', 'track', 'wpts', 'water']) id: {'type': 'geojson', 'data': empty},
   };
   final layers = <Map<String, dynamic>>[
     for (final l in base)
@@ -378,7 +378,7 @@ Map<String, dynamic> _tweak(Map<String, dynamic> l, String id) {
     case 'pois':
       // 장소마다 "이 확대 단계부터 보임"(min_zoom)이 있음. 2단계 일찍 보이게 하고,
       // 봉우리는 높이를 함께 보여 주는 별도 레이어(peaks)로 그림
-      final f = jsonEncode(l['filter']).replaceAll('["+",["get","min_zoom"],0]', '["-",["get","min_zoom"],2]');
+      final f = jsonEncode(l['filter']).replaceAll('["+",["get","min_zoom"],0]', '["-",["get","min_zoom"],3]');
       return {
         ...l,
         'filter': [
@@ -392,9 +392,15 @@ Map<String, dynamic> _tweak(Map<String, dynamic> l, String id) {
         },
       };
     case 'address_label':
-      return {...l, 'minzoom': 17}; // 번지: 18 -> 17
+      return {...l, 'minzoom': 16}; // 번지: 18 -> 16
     case 'roads_labels_minor':
-      return {...l, 'minzoom': 14}; // 골목 이름: 15 -> 14
+      return {...l, 'minzoom': 13}; // 골목 이름: 15 -> 13
+    case 'water_stream':
+      return {...l, 'minzoom': 11}; // 계곡·개울: 14 -> 11 (산에서 가장 중요한 지형지물)
+    case 'water_waterway_label':
+      return {...l, 'minzoom': 12}; // 하천·계곡 이름: 13 -> 12
+    case 'roads_minor_service_casing' || 'roads_link_casing':
+      return {...l, 'minzoom': 12};
   }
   return l;
 }
@@ -406,7 +412,7 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
         'type': 'line',
         'source': s,
         'source-layer': 'roads',
-        'minzoom': 12,
+        'minzoom': 11,
         'filter': [
           'in',
           ['get', 'kind_detail'],
@@ -424,7 +430,7 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
         'type': 'symbol',
         'source': s,
         'source-layer': 'buildings',
-        'minzoom': 16,
+        'minzoom': 15,
         'filter': ['has', 'name'],
         'layout': {
           'text-field': ['coalesce', ['get', 'name:ko'], ['get', 'name']],
@@ -439,7 +445,7 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
         'type': 'symbol',
         'source': s,
         'source-layer': 'landuse',
-        'minzoom': 14,
+        'minzoom': 13,
         'filter': [
           'all',
           ['has', 'name'],
@@ -463,7 +469,7 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
         'type': 'symbol',
         'source': s,
         'source-layer': 'pois',
-        'minzoom': 11,
+        'minzoom': 10,
         'filter': ['==', ['get', 'kind'], 'peak'],
         'layout': {
           'icon-image': 'peak',
@@ -488,8 +494,31 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
       },
     ];
 
-// 이동 기록 선, 저장한 지점, 내 위치 (맨 위)
+// 이동 기록 선, 가까운 수원지, 저장한 지점, 내 위치 (맨 위)
 const _meLayers = [
+  {
+    'id': 'water-pt',
+    'type': 'circle',
+    'source': 'water',
+    'paint': {
+      'circle-radius': 9,
+      'circle-color': '#1c7ed6',
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 2,
+    },
+  },
+  {
+    'id': 'water-num',
+    'type': 'symbol',
+    'source': 'water',
+    'layout': {
+      'text-field': ['get', 'n'],
+      'text-font': ['NotoSansMedium'],
+      'text-size': 11,
+      'text-allow-overlap': true,
+    },
+    'paint': {'text-color': '#ffffff'},
+  },
   {
     'id': 'track',
     'type': 'line',
@@ -553,7 +582,7 @@ class MapControl {
   final follow = ValueNotifier<bool>(true); // 내 위치 따라가기 (지도를 손으로 움직이면 해제)
   final headingUp = ValueNotifier<bool>(false); // 진행 방향이 위로 오게 지도 회전
   final tilted = ValueNotifier<bool>(false); // 3D (기울여 보기)
-  Map<String, dynamic> _track = _emptyFc, _wpts = _emptyFc;
+  Map<String, dynamic> _track = _emptyFc, _wpts = _emptyFc, _water = _emptyFc;
 
   static const _emptyFc = <String, dynamic>{'type': 'FeatureCollection', 'features': <dynamic>[]};
 
@@ -566,6 +595,23 @@ class MapControl {
     _ready = true;
     _ctl?.setGeoJsonSource('track', _track);
     _ctl?.setGeoJsonSource('wpts', _wpts);
+    _ctl?.setGeoJsonSource('water', _water);
+  }
+
+  /// 가까운 수원지를 1, 2, 3 번호 붙은 파란 점으로
+  void setWater(List<({double lat, double lon})> pts) {
+    _water = {
+      'type': 'FeatureCollection',
+      'features': [
+        for (var i = 0; i < pts.length; i++)
+          {
+            'type': 'Feature',
+            'geometry': {'type': 'Point', 'coordinates': [pts[i].lon, pts[i].lat]},
+            'properties': {'n': '${i + 1}'},
+          }
+      ],
+    };
+    if (_ready) _ctl?.setGeoJsonSource('water', _water);
   }
 
   void recenter(double lat, double lon) {

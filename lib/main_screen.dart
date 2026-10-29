@@ -11,7 +11,7 @@ import 'main.dart';
 import 'nav.dart';
 import 'offline_map.dart';
 import 'updater.dart';
-import 'water.dart' show waterChipLabel;
+import 'water.dart' show WaterSource, waterChipLabel;
 import 'weather.dart';
 
 // ============================================================
@@ -75,6 +75,40 @@ class _MainScreenState extends State<MainScreen> {
               Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage())),
         ),
       ));
+
+  void _showWater(List<WaterSource> ws) {
+    final s = widget.snap.value;
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const ListTile(
+            title: Text('가까운 수원지', style: TextStyle(fontWeight: FontWeight.bold)),
+            subtitle: Text('흐르는 물·샘·식수대·호수만 (소류지·저수지·연못·농수로 제외). 마시기 전 반드시 끓이거나 정수하세요'),
+          ),
+          for (var i = 0; i < ws.length; i++)
+            ListTile(
+              leading: CircleAvatar(
+                radius: 14,
+                backgroundColor: const Color(0xFF1C7ED6),
+                child: Text('${i + 1}', style: const TextStyle(color: Colors.white, fontSize: 13)),
+              ),
+              title: Text('${ws[i].label}${ws[i].name == null ? '' : ' · ${ws[i].name}'}'),
+              subtitle: Text(s.lat == null
+                  ? distanceLabel(ws[i].distanceM)
+                  : '${distanceLabel(ws[i].distanceM)}  ·  '
+                      '${directionLabel(bearingDeg(s.lat!, s.lon!, ws[i].lat, ws[i].lon))}'),
+              trailing: const Icon(Icons.map_outlined),
+              onTap: () {
+                Navigator.pop(ctx);
+                widget.map.recenter(ws[i].lat, ws[i].lon);
+                widget.map.follow.value = false;
+              },
+            ),
+        ]),
+      ),
+    );
+  }
 
   /// 👁 가시권: 현재 위치에서 5 km 안 지형에 가려 안 보이는 곳을 어둡게
   Future<void> _toggleViewshed() async {
@@ -257,23 +291,16 @@ class _MainScreenState extends State<MainScreen> {
               left: 10,
               bottom: ext * box.maxHeight + 10,
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                // "수원지 1.5 km" — 누르면 지도에서 그 위치로
-                ValueListenableBuilder(
+                // "수원지 1.5 km 외 2곳" — 누르면 목록, 지도에는 1·2·3 파란 점
+                ValueListenableBuilder<List<WaterSource>>(
                   valueListenable: widget.analysis.water,
-                  builder: (_, w, __) => w == null
+                  builder: (_, ws, __) => ws.isEmpty
                       ? const SizedBox.shrink()
                       : Padding(
                           padding: const EdgeInsets.only(bottom: 8),
                           child: GestureDetector(
-                            onTap: () {
-                              widget.map.recenter(w.lat, w.lon);
-                              widget.map.follow.value = false;
-                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                                content: Text('${w.label}${w.name == null ? '' : ' (${w.name})'} · '
-                                    '${distanceLabel(w.distanceM)}'),
-                              ));
-                            },
-                            child: _MapChip(icon: Icons.water_drop_outlined, text: waterChipLabel(w)),
+                            onTap: () => _showWater(ws),
+                            child: _MapChip(icon: Icons.water_drop_outlined, text: waterChipLabel(ws)),
                           ),
                         ),
                 ),

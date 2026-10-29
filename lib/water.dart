@@ -305,9 +305,15 @@ class WaterSource {
   const WaterSource(this.label, this.name, this.lat, this.lon, this.distanceM);
 }
 
-/// 물 레이어에서 바다(ocean) 제외. 하천·계곡·호수·저수지·연못 등, 그리고 식수대·샘 같은 장소
+/// 이름으로 걸러낼 고인 물·인공 수로 (OSM에서 호수나 일반 물로 잘못 분류된 경우까지 잡기 위해)
+const _stagnantNames = ['소류지', '저수지', '유수지', '저류지', '연못', '양어장', '배수', '농수로', '수로', '침사지', '못'];
+
+/// 생존용 수원지로 쓸 만한 물만 고름. 흐르는 물(계곡·개울·하천), 샘, 식수대, 자연 호수.
+/// 고인 물(소류지·저수지·연못)과 농수로·배수로·운하는 정체·오염 위험이 커서 제외. 바다·수영장·분수도 제외
 String? waterLabel(String layer, Map<String, Object?> p) {
   final kind = p['kind'] as String?, detail = p['kind_detail'] as String?;
+  final name = (p['name:ko'] ?? p['name']) as String?;
+  if (name != null && _stagnantNames.any((s) => s.length > 1 ? name.contains(s) : name.endsWith(s))) return null;
   if (layer == 'pois') {
     return switch (kind) {
       'drinking_water' => '식수대',
@@ -317,14 +323,13 @@ String? waterLabel(String layer, Map<String, Object?> p) {
     };
   }
   // 실제 한국 지도에서 확인한 종류: 선은 kind=river/stream, 면은 kind=water + kind_detail(river/lake/stream).
-  // 바다·수영장·분수는 마실 물이 아님
+  // kind_detail 없는 kind=water 면은 대부분 연못·소류지라 제외
   if (const {'ocean', 'playa', 'swimming_pool', 'fountain'}.contains(kind)) return null;
   return switch (kind == 'water' ? detail : kind) {
-    'stream' || 'ditch' || 'drain' => '계곡·개울',
-    'river' || 'riverbank' || 'canal' => '하천',
-    'reservoir' => '저수지',
+    'stream' => '계곡·개울',
+    'river' || 'riverbank' => '하천',
     'lake' => '호수',
-    _ => kind == 'water' ? '연못·물' : null,
+    _ => null, // reservoir, basin, pond, ditch, drain, canal, 분류 없음
   };
 }
 
@@ -348,12 +353,40 @@ const _zoom = 14;
 
 double _sinh(double x) => (exp(x) - exp(-x)) / 2;
 
-/// [lat],[lon] 주변 타일을 가까운 순으로 훑어 가장 가까운 수원지를 찾음 (최대 반경 약 [maxTiles]칸 ≈ 2.4 km × n)
-WaterSource? nearestWater(PmTiles pm, double lat, double lon, {int maxRing = 4}) {
+/// 가까운 수원지 [count]곳. 같은 계곡이 타일마다 조각나 있으므로 이름이 같거나 300 m 안에 붙은 것은 하나로 침
+List<WaterSource> nearestWaters(PmTiles pm, double lat, double lon, {int count = 3, int maxRing = 4}) {
   final (cx, cy) = _tileXY(lat, lon);
   final mLat = 111320.0, mLon = 111320.0 * cos(lat * pi / 180);
-  WaterSource? best;
+  final tileM = 40075016.686 * cos(lat * pi / 180) / (1 << _zoom);
+  final all = <WaterSource>[];
+  List<WaterSource> pick() {
+    final sorted = [...all]..sort((a, b) => a.distanceM.compareTo(b.distanceM));
+    final out = <WaterSource>[];
+    for (final w in sorted) {
+      final dup = out.any((o) =>
+          (w.name != null && w.name == o.name) || distanceM(w.lat, w.lon, o.lat, o.lon) < 300);
+      if (!dup) out.add(w);
+      if (out.length == count) break;
+    }
+    return out;
+  }
+
   for (var ring = 0; ring <= maxRing; ring++) {
+    _scanRing(pm, cx, cy, ring, lat, lon, mLat, mLon, all.add);
+    // 이번 고리까지 찾은 것보다 다음 고리가 더 가까울 수 없으면 종료 (타일 한 칸 ≈ 2.4 km)
+    final got = pick();
+    if (got.length == count && got.last.distanceM <= ring * tileM) return got;
+  }
+  return pick();
+}
+
+WaterSource? nearestWater(PmTiles pm, double lat, double lon, {int maxRing = 4}) =>
+    nearestWaters(pm, lat, lon, count: 1, maxRing: maxRing).firstOrNull;
+
+/// 한 고리(가운데 타일에서 ring칸 떨어진 테두리)의 수원지를 찾아 [add]로 넘김 (지물마다 가장 가까운 점 하나)
+void _scanRing(PmTiles pm, int cx, int cy, int ring, double lat, double lon, double mLat, double mLon,
+    void Function(WaterSource) add) {
+  {
     for (var dy = -ring; dy <= ring; dy++) {
       for (var dx = -ring; dx <= ring; dx++) {
         if (max(dx.abs(), dy.abs()) != ring) continue;
@@ -400,18 +433,14 @@ WaterSource? nearestWater(PmTiles pm, double lat, double lon, {int maxRing = 4})
               bestD = 0;
               bestP = (lat, lon);
             }
-            if (bestP != null && (best == null || bestD < best.distanceM)) {
-              best = WaterSource(label, (f.props['name:ko'] ?? f.props['name']) as String?, bestP!.$1, bestP!.$2, bestD);
+            if (bestP != null) {
+              add(WaterSource(label, (f.props['name:ko'] ?? f.props['name']) as String?, bestP!.$1, bestP!.$2, bestD));
             }
           }
         }
       }
     }
-    // 이번 고리까지 찾은 것보다 다음 고리가 더 가까울 수 없으면 종료 (타일 한 칸 ≈ 2.4 km)
-    final tileM = 40075016.686 * cos(lat * pi / 180) / (1 << _zoom);
-    if (best != null && best.distanceM <= ring * tileM) break;
   }
-  return best;
 }
 
 bool _inside(List<(double, double)> ring, double lat, double lon) {
@@ -424,4 +453,5 @@ bool _inside(List<(double, double)> ring, double lat, double lon) {
   return inside;
 }
 
-String waterChipLabel(WaterSource w) => '수원지 ${distanceLabel(w.distanceM)}';
+String waterChipLabel(List<WaterSource> ws) =>
+    '수원지 ${distanceLabel(ws.first.distanceM)}${ws.length > 1 ? ' 외 ${ws.length - 1}곳' : ''}';

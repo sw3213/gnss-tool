@@ -16,10 +16,10 @@ import 'water.dart';
 // ============================================================
 
 /// 별도 스레드에서 실행 (최상위 함수라 넘기는 값이 문자열·숫자뿐)
-WaterSource? _findWater((String, double, double) a) {
+List<WaterSource> _findWater((String, double, double) a) {
   final pm = PmTiles.open(a.$1);
   try {
-    return nearestWater(pm, a.$2, a.$3);
+    return nearestWaters(pm, a.$2, a.$3);
   } finally {
     pm.close();
   }
@@ -33,7 +33,7 @@ class TerrainAnalysis {
   final slope = ValueNotifier<String?>(null); // "전방 내리막 -5m · -4%"
   final sunToday = ValueNotifier<TerrainSun?>(null);
   TerrainSun? _sunTomorrow;
-  final water = ValueNotifier<WaterSource?>(null);
+  final water = ValueNotifier<List<WaterSource>>([]); // 가까운 수원지 최대 3곳
   final hasDem = ValueNotifier<bool>(false);
 
   DemFile? _dem;

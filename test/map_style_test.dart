@@ -31,9 +31,9 @@ void main() {
     expect(ids, containsAll(['m_kr-buildings', 'm_kr-pois', 'm_kr-trails', 'm_kr-peaks', 'm_kr-area-names', 'me']));
     expect(ids.first, 'background');
 
-    // 장소 아이콘이 2단계 일찍 보이도록 바뀌었는지 (원본 스타일 형식이 바뀌면 여기서 잡힘)
+    // 장소 아이콘이 3단계 일찍 보이도록 바뀌었는지 (원본 스타일 형식이 바뀌면 여기서 잡힘)
     final pois = (style['layers'] as List).cast<Map>().firstWhere((l) => l['id'] == 'm_kr-pois');
-    expect(jsonEncode(pois['filter']), contains('["-",["get","min_zoom"],2]'));
+    expect(jsonEncode(pois['filter']), contains('["-",["get","min_zoom"],3]'));
   });
 
   test('terrain layers sit under water and roads, labels on top', () async {
