@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'dop.dart';
+import 'offline_map.dart';
 import 'phone_gnss.dart';
 import 'updater.dart';
 import 'weather.dart';
@@ -617,6 +618,7 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final pages = <Widget>[
+      if (isAndroid) MapPage(snap: parser.notifier), // MapLibre 네이티브 지도는 안드로이드만
       SkyPage(snap: parser.notifier),
       QualityPage(snap: parser.notifier),
       SensorPage(data: sensors, weather: weather, qnhHistory: qnhHistory),
@@ -683,8 +685,9 @@ class _HomePageState extends State<HomePage> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
         onDestinationSelected: (i) => setState(() => tab = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.public), label: '스카이플롯'),
+        destinations: [
+          if (isAndroid) const NavigationDestination(icon: Icon(Icons.map), label: '지도'),
+          const NavigationDestination(icon: Icon(Icons.public), label: '스카이플롯'),
           NavigationDestination(icon: Icon(Icons.speed), label: '품질'),
           NavigationDestination(icon: Icon(Icons.show_chart), label: '센서'),
           NavigationDestination(icon: Icon(Icons.terminal), label: 'NMEA'),
