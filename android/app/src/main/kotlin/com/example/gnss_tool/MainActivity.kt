@@ -48,6 +48,19 @@ class MainActivity : FlutterActivity() {
 
     private fun crashFile() = File(filesDir, "last_crash.txt")
 
+    /** 직전 실행이 크래시·ANR로 끝났는지 (업데이트 설치, 사용자가 닫음 등 정상 종료는 false) */
+    private val lastExitWasCrash: Boolean by lazy {
+        if (crashFile().exists()) return@lazy true
+        if (Build.VERSION.SDK_INT < 30) return@lazy false
+        val info = getSystemService(ActivityManager::class.java)
+            .getHistoricalProcessExitReasons(packageName, 0, 1).firstOrNull()
+        info?.reason in setOf(
+            ApplicationExitInfo.REASON_CRASH,
+            ApplicationExitInfo.REASON_CRASH_NATIVE,
+            ApplicationExitInfo.REASON_ANR,
+        )
+    }
+
     /** 지난 실행이 비정상 종료였다면 그 이유(한 번만 반환), 아니면 null */
     private fun lastCrash(): String? {
         val parts = mutableListOf<String>()
@@ -92,9 +105,13 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         val messenger = flutterEngine.dartExecutor.binaryMessenger
 
+        lastExitWasCrash // lastCrash()가 크래시 파일을 지우기 전에 먼저 판정해 둠
         MethodChannel(messenger, "gnss_tool/diag").setMethodCallHandler { call, result ->
-            if (call.method == "lastCrash") result.success(runCatching { lastCrash() }.getOrNull())
-            else result.notImplemented()
+            when (call.method) {
+                "lastCrash" -> result.success(runCatching { lastCrash() }.getOrNull())
+                "lastExitWasCrash" -> result.success(lastExitWasCrash)
+                else -> result.notImplemented()
+            }
         }
 
         // 지도 다운로드는 안드로이드 다운로드 관리자에 맡김: 앱을 닫아도 계속 받고, 끊기면 알아서 이어받고,

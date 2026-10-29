@@ -65,10 +65,22 @@ class MapStore {
 
   String? fileOf(String id) => _files[id];
 
-  // 안전 모드: 지도가 화면에 떠 있는 동안 표시 파일을 둠. 앱이 죽으면 파일이 남아
-  // 다음 실행 때 지도를 바로 열지 않음 (켜자마자 다시 죽는 반복 방지)
+  // 안전 모드: 지도가 화면에 떠 있는 동안 표시 파일을 둠. 표시 파일이 남아 있고 직전 종료가
+  // 크래시였을 때만 지도를 바로 열지 않음 (켜자마자 다시 죽는 반복 방지).
+  // 업데이트 설치·앱 닫기처럼 정상 종료로 남은 표시 파일은 그냥 지움
   Future<File> _openFlag() async => File('${(await _maps()).parent.path}/map_open.flag');
-  Future<bool> crashedWhileMapOpen() async => (await _openFlag()).existsSync();
+  Future<bool> crashedWhileMapOpen() async {
+    final f = await _openFlag();
+    if (!f.existsSync()) return false;
+    bool crashed;
+    try {
+      crashed = await const MethodChannel('gnss_tool/diag').invokeMethod<bool>('lastExitWasCrash') ?? false;
+    } catch (_) {
+      crashed = false;
+    }
+    if (!crashed) f.deleteSync();
+    return crashed;
+  }
   Future<void> markMapOpen(bool open) async {
     final f = await _openFlag();
     if (open) {
