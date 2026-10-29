@@ -1,0 +1,3960 @@
+// Copyright 2018 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+package org.maplibre.maplibregl;
+
+import android.Manifest;
+import android.annotation.SuppressLint;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.content.res.AssetFileDescriptor;
+import android.os.Bundle;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.PointF;
+import android.graphics.RectF;
+import android.location.Location;
+import android.os.Build;
+import android.util.DisplayMetrics;
+import android.util.Log;
+import android.util.Pair;
+import android.content.ComponentCallbacks2;
+import android.content.res.Configuration;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.TextureView;
+import android.view.View;
+import android.widget.FrameLayout;
+
+import androidx.annotation.NonNull;
+import androidx.lifecycle.DefaultLifecycleObserver;
+import androidx.lifecycle.Lifecycle;
+import androidx.lifecycle.LifecycleOwner;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
+import org.jetbrains.annotations.NotNull;
+import org.maplibre.android.camera.CameraPosition;
+import org.maplibre.android.camera.CameraUpdate;
+import org.maplibre.android.camera.CameraUpdateFactory;
+import org.maplibre.android.constants.MapLibreConstants;
+import org.maplibre.android.geometry.LatLng;
+import org.maplibre.android.geometry.LatLngBounds;
+import org.maplibre.android.geometry.LatLngQuad;
+import org.maplibre.android.geometry.VisibleRegion;
+import org.maplibre.android.gestures.AndroidGesturesManager;
+import org.maplibre.android.gestures.MoveGestureDetector;
+import org.maplibre.android.location.LocationComponent;
+import org.maplibre.android.location.LocationComponentActivationOptions;
+import org.maplibre.android.location.LocationComponentOptions;
+import org.maplibre.android.location.OnCameraTrackingChangedListener;
+import org.maplibre.android.location.engine.LocationEngineCallback;
+import org.maplibre.android.location.engine.LocationEngineRequest;
+import org.maplibre.android.location.engine.LocationEngineResult;
+import org.maplibre.android.location.modes.CameraMode;
+import org.maplibre.android.location.modes.RenderMode;
+import org.maplibre.android.maps.MapLibreMap;
+import org.maplibre.android.maps.MapLibreMapOptions;
+import org.maplibre.android.maps.MapView;
+import org.maplibre.android.maps.OnMapReadyCallback;
+import org.maplibre.android.maps.Style;
+import org.maplibre.android.offline.OfflineManager;
+import org.maplibre.android.style.expressions.Expression;
+import org.maplibre.android.style.layers.CircleLayer;
+import org.maplibre.android.style.layers.BackgroundLayer;
+import org.maplibre.android.style.layers.ColorReliefLayer;
+import org.maplibre.android.style.layers.FillExtrusionLayer;
+import org.maplibre.android.style.layers.FillLayer;
+import org.maplibre.android.style.layers.HeatmapLayer;
+import org.maplibre.android.style.layers.HillshadeLayer;
+import org.maplibre.android.style.layers.Layer;
+import org.maplibre.android.style.layers.LineLayer;
+import org.maplibre.android.style.layers.Property;
+import org.maplibre.android.style.layers.PropertyFactory;
+import org.maplibre.android.style.layers.PropertyValue;
+import org.maplibre.android.style.light.Position;
+import org.maplibre.android.style.light.Light;
+import org.maplibre.android.style.layers.RasterLayer;
+import org.maplibre.android.style.layers.SymbolLayer;
+import org.maplibre.android.style.sources.CustomGeometrySource;
+import org.maplibre.android.style.sources.GeoJsonOptions;
+import org.maplibre.android.style.sources.GeoJsonSource;
+import org.maplibre.android.style.sources.ImageSource;
+import org.maplibre.android.style.sources.Source;
+import org.maplibre.android.style.sources.VectorSource;
+import org.maplibre.geojson.Feature;
+import org.maplibre.geojson.FeatureCollection;
+import org.maplibre.geojson.Point;
+import org.maplibre.android.net.ConnectivityReceiver;
+import org.maplibre.android.snapshotter.MapSnapshot;
+import org.maplibre.android.snapshotter.MapSnapshotter;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+import io.flutter.plugin.common.BinaryMessenger;
+import io.flutter.plugin.common.MethodCall;
+import io.flutter.plugin.common.MethodChannel;
+import io.flutter.plugin.platform.PlatformView;
+
+
+/**
+ * Controller of a single MapLibre {@link MapView} instance exposed as a Flutter
+ * {@link PlatformView}. Mediates between the Flutter method channel, the host
+ * activity {@link Lifecycle}, and the native {@link MapView}.
+ *
+ * <h2>Surviving activity recreation</h2>
+ * Android can destroy and recreate the host activity at any time (rotation, "Don't keep
+ * activities", memory pressure). The {@link MapView} holds GL resources tied to the activity
+ * that built it, so it is destroyed with the activity and rebuilt against the new one, without
+ * the Flutter widget tree seeing the swap.
+ *
+ * <p>Carried across: the camera ({@link #lastCameraPosition}), MapLibre's own state bundle
+ * ({@link #savedMapViewState}), and the controller fields, which outlive the activity. Lost:
+ * sources, layers, images and other runtime style changes, which Dart re-applies when
+ * {@code map#onStyleLoaded} fires for the new MapView. {@link #recreateMapViewIfNecessary()}
+ * lists both sides in full.
+ *
+ * <p>{@link MapLibreMapFactory} broadcasts the activity hooks ({@link #onActivityAttached()},
+ * {@link #onActivityDetached()}, {@link #onActivityRebound()}); with the
+ * {@code mapViewCreated/Started/Resumed} flags they keep each MapView's lifecycle calls
+ * balanced however Jetpack replays events. While the MapView is being rebuilt,
+ * {@code map#waitForMap} parks its result until {@link #onMapReady} fires again, and every
+ * other map-touching call answers {@code MAP_NOT_READY}.
+ *
+ * <p>{@code map#pause} / {@code map#resume} drive rendering explicitly through
+ * {@link #userPaused}: a map paused from Dart stays paused even when the activity returns to
+ * the foreground.
+ */
+@SuppressLint("MissingPermission")
+final class MapLibreMapController
+    implements DefaultLifecycleObserver,
+        ComponentCallbacks2,
+        MapLibreMap.OnCameraIdleListener,
+        MapLibreMap.OnCameraMoveListener,
+        MapLibreMap.OnCameraMoveStartedListener,
+        MapView.OnDidBecomeIdleListener,
+        MapLibreMap.OnMapClickListener,
+        MapLibreMap.OnMapLongClickListener,
+        MapLibreMapOptionsSink,
+        MethodChannel.MethodCallHandler,
+        OnMapReadyCallback,
+        OnCameraTrackingChangedListener,
+        PlatformView {
+  private static final String TAG = "MapLibreMapController";
+
+  /**
+   * Duration used for {@code locationComponent#setTrackingCameraOptions} when Dart
+   * sends none. Mirrors the SDK's own {@code DEFAULT_TRACKING_TILT_ANIM_DURATION},
+   * which is package-private, so the callback-taking overload cannot reuse it.
+   */
+  private static final long DEFAULT_TRACKING_TILT_DURATION_MS = 1250;
+
+  private final int id;
+  private final MethodChannel methodChannel;
+  private final MapLibreMapsPlugin.LifecycleProvider lifecycleProvider;
+  private final MapLibreMapOptions mapLibreMapOptions;
+  /**
+   * The {@link Lifecycle} this controller is currently observing. Used to detect
+   * stale callbacks from a destroyed activity and to avoid double-subscription
+   * when the host activity is recreated (e.g. "Don't keep activities", rotation).
+   */
+  private Lifecycle boundLifecycle;
+  /**
+   * Last known camera position. Saved before destroying the {@link MapView} so it
+   * can be restored once the map is recreated in a fresh activity. Cleared after
+   * being applied in {@link #onMapReady(MapLibreMap)}.
+   */
+  private CameraPosition lastCameraPosition;
+  /**
+   * State bundle written by {@link MapView#onSaveInstanceState(Bundle)} before the
+   * {@link MapView} is destroyed and read back by {@link MapView#onCreate(Bundle)}
+   * on the recreated instance. Lets MapLibre restore internal state (camera, style
+   * progress, etc.) across activity recreation, complementing {@link #lastCameraPosition}.
+   */
+  private final Bundle savedMapViewState = new Bundle();
+  private float density;
+  private final Context applicationContext;
+  /**
+   * Activity context used to build the {@link MapView}. Re-pointed at the current
+   * activity on every {@link #onActivityAttached()}/{@link #onActivityRebound()} so
+   * we don't pin a destroyed activity in memory. Register long-lived listeners against
+   * {@link #applicationContext} instead of this field.
+   */
+  private Context context;
+  private final String styleStringInitial;
+  /**
+   * Container that wraps the {@link MapView}. Returned as the platform view so the
+   * inner {@link MapView} can be swapped out (after activity recreation) without
+   * Flutter noticing. Created with {@link #applicationContext} on purpose: it lives
+   * across activities, and uses no activity-themed attributes.
+   * See {@link MapLibreMapController#destroyMapViewIfNecessary()} for details.
+   */
+  private FrameLayout mapViewContainer;
+  private MapView mapView;
+  private MapLibreMap mapLibreMap;
+  private boolean trackCameraPosition = false;
+  private boolean myLocationEnabled = false;
+  private boolean manualLocationSource = false;
+  private int myLocationTrackingMode = 0;
+  private int myLocationRenderMode = 0;
+  private LocationEngineFactory myLocationEngineFactory = new LocationEngineFactory();
+  private boolean disposed = false;
+  private boolean dragEnabled = true;
+  private boolean featureTapsTriggersMapClick = false;
+  // Tint of the attribution (i) button, or null to leave the MapLibre SDK
+  // default in place. Only set through the attributionButtonColor map option.
+  private Integer attributionButtonColor = null;
+  /**
+   * Idempotency guards for {@link MapView} lifecycle dispatch, so each transition fires
+   * once per {@link MapView} instance. See the lifecycle observer section below.
+   */
+  private boolean mapViewCreated = false;
+  private boolean mapViewStarted = false;
+  private boolean mapViewResumed = false;
+  /**
+   * True when Dart has explicitly requested {@code pauseMap()}. Suppresses the
+   * natural {@link #onResume(LifecycleOwner)} until {@code resumeMap()} is called,
+   * so a backgrounded map stays paused even when the host activity returns to the
+   * foreground.
+   */
+  private boolean userPaused = false;
+  private MethodChannel.Result mapReadyResult;
+  private LocationComponent locationComponent = null;
+  private LocationEngineCallback<LocationEngineResult> locationEngineCallback = null;
+  private Style style;
+  private Feature draggedFeature;
+  private AndroidGesturesManager androidGesturesManager;
+
+  private LatLng dragOrigin;
+  private LatLng dragPrevious;
+  private MapSnapshotter activeSnapshotter;
+
+  private Set<String> interactiveFeatureLayerIds;
+  private Map<String, FeatureCollection> addedFeaturesByLayer;
+
+  private LatLngBounds bounds = null;
+  Style.OnStyleLoaded onStyleLoadedCallback =
+      new Style.OnStyleLoaded() {
+        @Override
+        public void onStyleLoaded(@NonNull Style style) {
+          MapLibreMapController.this.style = style;
+
+          // Called unconditionally: updateMyLocationEnabled() checks myLocationEnabled
+          // itself, and enableLocationComponent() checks the permission, so a map
+          // without either ends up doing nothing here. Calling it on every style load
+          // is what brings the location component back after the style is replaced or
+          // the activity is recreated, which an early return would skip.
+          updateMyLocationEnabled();
+
+          if (null != bounds) {
+            setCameraTargetBounds(bounds);
+          }
+
+          mapLibreMap.addOnMapClickListener(MapLibreMapController.this);
+          mapLibreMap.addOnMapLongClickListener(MapLibreMapController.this);
+
+          methodChannel.invokeMethod("map#onStyleLoaded", null);
+        }
+      };
+
+  MapLibreMapController(
+      int id,
+      Context context,
+      BinaryMessenger messenger,
+      MapLibreMapsPlugin.LifecycleProvider lifecycleProvider,
+      MapLibreMapOptions options,
+      String styleStringInitial,
+      boolean dragEnabled,
+      boolean featureTapsTriggersMapClick
+  ) {
+    MapLibreUtils.getMapLibre(context);
+    this.id = id;
+    this.context = context;
+    this.applicationContext =
+        context.getApplicationContext() != null ? context.getApplicationContext() : context;
+    this.mapLibreMapOptions = options;
+    this.dragEnabled = dragEnabled;
+    this.featureTapsTriggersMapClick = featureTapsTriggersMapClick;
+    this.styleStringInitial = styleStringInitial;
+    this.mapViewContainer = new FrameLayout(applicationContext);
+    this.mapView = new MapView(context, options);
+    this.interactiveFeatureLayerIds = new HashSet<>();
+    this.addedFeaturesByLayer = new HashMap<String, FeatureCollection>();
+    this.density = context.getResources().getDisplayMetrics().density;
+    this.lifecycleProvider = lifecycleProvider;
+    if (dragEnabled) {
+      this.androidGesturesManager = new AndroidGesturesManager(this.mapView.getContext(), false);
+    }
+
+    mapViewContainer.addView(mapView);
+    methodChannel = new MethodChannel(messenger, "plugins.flutter.io/maplibre_gl_" + id);
+    methodChannel.setMethodCallHandler(this);
+  }
+
+  @Override
+  public View getView() {
+    return mapViewContainer;
+  }
+
+  /**
+   * Initial wire-up after construction. Order matters:
+   * <ol>
+   *   <li>Register component callbacks against the {@link #applicationContext}
+   *       so we don't pin the host {@link android.app.Activity}.</li>
+   *   <li>Subscribe to the host activity {@link Lifecycle}. Jetpack replays the
+   *       missed events synchronously, which drives {@code mapView.onCreate()},
+   *       {@code onStart()} and {@code onResume()} via our lifecycle observer
+   *       methods. The {@link #savedMapViewState} bundle is empty here, which
+   *       is equivalent to "no saved state" for MapLibre.</li>
+   *   <li>Call {@link MapView#getMapAsync} only AFTER {@code onCreate} has fired,
+   *       to comply with MapLibre's documented call order.</li>
+   * </ol>
+   */
+  void init() {
+    applicationContext.registerComponentCallbacks(this);
+    registerToLifecycle();
+    mapView.getMapAsync(this);
+  }
+
+  /**
+   * Invoked by {@link MapLibreMapFactory} when the plugin re-attaches to an activity.
+   * Triggered both on first attach and after a full activity teardown (e.g. with
+   * "Don't keep activities" enabled). Refreshes context references, recreates the
+   * {@link MapView} if the previous one was destroyed, and rebinds the new lifecycle.
+   */
+  void onActivityAttached() {
+    rebindToActivity();
+  }
+
+  /**
+   * Points the controller at the activity currently hosting it: refreshes the context
+   * references, rebuilds the {@link MapView} if the previous one was destroyed, and
+   * moves the lifecycle subscription to the new activity.
+   *
+   * <p>Shared by {@link #onActivityAttached()} and {@link #onActivityRebound()}. Both
+   * hooks reach this in the same state, because in the Flutter standard ordering the
+   * old activity's {@code onDestroy} has already torn the MapView down by the time
+   * either runs; keeping one implementation is what stops the two paths drifting.
+   */
+  private void rebindToActivity() {
+    if (disposed) {
+      return;
+    }
+
+    unregisterFromLifecycle();
+    updateActivityContext();
+
+    final boolean recreated = (mapView == null);
+    if (recreated) {
+      recreateMapViewIfNecessary();
+    }
+
+    // Register the new lifecycle BEFORE getMapAsync so Jetpack's synchronous
+    // replay drives mapView.onCreate(savedMapViewState) first. Calling
+    // getMapAsync against a not-yet-created MapView is technically tolerated
+    // by MapLibre but violates the documented contract.
+    registerToLifecycle();
+
+    if (recreated) {
+      mapView.getMapAsync(this);
+    }
+  }
+
+  /**
+   * Invoked when the plugin is fully detached from the activity (i.e. the host
+   * activity is being destroyed without a config change, e.g. "Don't keep
+   * activities" or a real activity finish). Saves what state we can and tears
+   * down the native {@link MapView}.
+   */
+  void onActivityDetached() {
+    saveCameraPosition();
+    destroyMapViewIfNecessary();
+    unregisterFromLifecycle();
+  }
+
+  /**
+   * Invoked after a configuration change (e.g. rotation). In the Flutter standard
+   * ordering the old activity's {@code onDestroy} fires before this hook, so by
+   * the time we get here the {@link MapView} has already been torn down via the
+   * lifecycle observer and we go through the same path as a full re-attach. The
+   * fast-path (mapView still alive) only triggers if reattachment somehow beats
+   * the old activity's destroy callback. {@link #lastCameraPosition} and
+   * {@link #savedMapViewState} bridge the gap either way.
+   */
+  void onActivityRebound() {
+    rebindToActivity();
+  }
+
+  /**
+   * Re-points {@link #context} at the freshly attached activity so we never hold a
+   * destroyed activity reference. Also refreshes {@link #density} because display
+   * configuration can change across activity recreation (font scale, display size).
+   */
+  private void updateActivityContext() {
+    final Context activityContext = lifecycleProvider.getContext();
+    if (activityContext != null) {
+      this.context = activityContext;
+      this.density = activityContext.getResources().getDisplayMetrics().density;
+    }
+  }
+
+  private void registerToLifecycle() {
+    Lifecycle lifecycle = lifecycleProvider.getLifecycle();
+    if (lifecycle != null && lifecycle != boundLifecycle) {
+      lifecycle.addObserver(this);
+      boundLifecycle = lifecycle;
+    }
+  }
+
+  private void unregisterFromLifecycle() {
+    if (boundLifecycle != null) {
+      boundLifecycle.removeObserver(this);
+      boundLifecycle = null;
+    }
+  }
+
+  private void saveCameraPosition() {
+    if (mapLibreMap != null) {
+      lastCameraPosition = mapLibreMap.getCameraPosition();
+    }
+  }
+
+  /**
+   * Builds a fresh {@link MapView} bound to the current activity context. Caller
+   * must have already updated {@link #context} via {@link #updateActivityContext()}
+   * and must call {@link MapView#getMapAsync} AFTER the lifecycle has been bound
+   * (so {@code mapView.onCreate(savedMapViewState)} runs first via the lifecycle
+   * observer replay).
+   *
+   * <p>State preserved across recreation:
+   * <ul>
+   *   <li>{@link #lastCameraPosition} (re-applied in {@link #onMapReady}).</li>
+   *   <li>{@link #savedMapViewState} (handed to {@code mapView.onCreate}).</li>
+   *   <li>Construction-time {@link MapLibreMapOptions} (UI flags, gestures, etc.).</li>
+   *   <li>Controller fields like {@link #trackCameraPosition}, {@link #myLocationEnabled},
+   *       {@link #myLocationTrackingMode}, {@link #myLocationRenderMode}, {@link #bounds}.</li>
+   * </ul>
+   *
+   * <p>State lost across recreation (must be re-applied from Dart on
+   * {@code onStyleLoadedCallback}):
+   * <ul>
+   *   <li>Sources / layers / images added at runtime via the method channel.</li>
+   *   <li>Style switched at runtime via {@code setStyleString} (reverts to the
+   *       initial style).</li>
+   *   <li>Runtime tweaks to UI flags applied via {@code map#update} after
+   *       construction (compass, attribution, content insets, etc.).</li>
+   *   <li>In-flight gestures handled by {@link AndroidGesturesManager}.</li>
+   * </ul>
+   */
+  private void recreateMapViewIfNecessary() {
+    if (mapView != null) {
+      return;
+    }
+
+    final Context mapContext = (context != null) ? context : applicationContext;
+
+    mapLibreMap = null;
+    style = null;
+    locationComponent = null;
+    mapViewCreated = false;
+    mapViewStarted = false;
+    mapViewResumed = false;
+    interactiveFeatureLayerIds.clear();
+    addedFeaturesByLayer.clear();
+
+    mapViewContainer.removeAllViews();
+    mapView = new MapView(mapContext, mapLibreMapOptions);
+    if (dragEnabled) {
+      androidGesturesManager = new AndroidGesturesManager(mapView.getContext(), false);
+    }
+    mapViewContainer.addView(mapView);
+    // NOTE: getMapAsync is intentionally NOT called here. The caller is responsible
+    // for invoking it after registerToLifecycle() so that mapView.onCreate fires
+    // first (see onActivityAttached / onActivityRebound).
+  }
+
+  private void moveCamera(CameraUpdate cameraUpdate) {
+    mapLibreMap.moveCamera(cameraUpdate);
+  }
+
+  private void animateCamera(CameraUpdate cameraUpdate) {
+    mapLibreMap.animateCamera(cameraUpdate);
+  }
+
+  private CameraPosition getCameraPosition() {
+    if (!trackCameraPosition || mapLibreMap == null) {
+      return null;
+    }
+    return mapLibreMap.getCameraPosition();
+  }
+
+  @Override
+  public void onMapReady(MapLibreMap mapLibreMap) {
+    this.mapLibreMap = mapLibreMap;
+    if (mapReadyResult != null) {
+      mapReadyResult.success(null);
+      mapReadyResult = null;
+    }
+    mapLibreMap.addOnCameraMoveStartedListener(this);
+    mapLibreMap.addOnCameraMoveListener(this);
+    mapLibreMap.addOnCameraIdleListener(this);
+
+    // Re-apply an app-provided attribution tint: UiSettings belongs to the
+    // MapView, so a recreated view (activity rebind) would otherwise fall back
+    // to the SDK default. Without the option we leave that default alone.
+    if (attributionButtonColor != null) {
+      mapLibreMap.getUiSettings().setAttributionTintColor(attributionButtonColor);
+    }
+
+    // Apply camera target bounds if set during initialization
+    if (bounds != null) {
+      mapLibreMap.setLatLngBoundsForCameraTarget(bounds);
+    }
+
+    // Camera restoration after activity recreation.
+    // Priority order:
+    //   1. lastCameraPosition saved before the previous MapView was destroyed.
+    //   2. initial camera supplied via MapLibreMapOptions (covers the edge case
+    //      where the previous MapView was destroyed before onMapReady ever ran,
+    //      so lastCameraPosition was never populated).
+    CameraPosition restorePosition = lastCameraPosition;
+    if (restorePosition == null) {
+      restorePosition = mapLibreMapOptions.getCamera();
+    }
+    if (restorePosition != null) {
+      mapLibreMap.moveCamera(CameraUpdateFactory.newCameraPosition(restorePosition));
+      lastCameraPosition = null;
+    }
+
+    if (androidGesturesManager != null) {
+      androidGesturesManager.setMoveGestureListener(new MoveGestureListener());
+      mapView.setOnTouchListener(
+          new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+              androidGesturesManager.onTouchEvent(event);
+
+              return draggedFeature != null;
+            }
+          });
+    }
+
+    mapView.addOnStyleImageMissingListener(
+        (id) -> {
+          DisplayMetrics displayMetrics = context.getResources().getDisplayMetrics();
+          final Bitmap bitmap = getScaledImage(id, displayMetrics.density);
+          if (bitmap != null) {
+            mapLibreMap.getStyle().addImage(id, bitmap);
+          }
+        });
+
+    mapView.addOnDidBecomeIdleListener(this);
+
+    setStyleString(styleStringInitial);
+  }
+
+  @Override
+  public void setStyleString(@NonNull String styleString) {
+    // clear old layer id from the location Component
+    clearLocationComponentLayer();
+    styleString = styleString.trim();
+
+    // Prevent race conditions: invalidate current style reference & interactive layers
+    // Old Style instances become invalid immediately after setStyle is called.
+    this.style = null;
+    if (interactiveFeatureLayerIds != null) {
+      interactiveFeatureLayerIds.clear();
+    }
+
+    // Check if json, url, absolute path or asset path:
+    if (styleString == null || styleString.isEmpty()) {
+      Log.e(TAG, "setStyleString - string empty or null");
+    } else if (styleString.startsWith("{") || styleString.startsWith("[")) {
+      mapLibreMap.setStyle(new Style.Builder().fromJson(styleString), onStyleLoadedCallback);
+    } else if (styleString.startsWith("/")) {
+      // Absolute path
+      mapLibreMap.setStyle(
+          new Style.Builder().fromUri("file://" + styleString), onStyleLoadedCallback);
+    } else if (!styleString.startsWith("http://")
+        && !styleString.startsWith("https://")
+        && !styleString.startsWith("mapbox://")) {
+      // We are assuming that the style will be loaded from an asset here.
+      String key = MapLibreMapsPlugin.flutterAssets.getAssetFilePathByName(styleString);
+      mapLibreMap.setStyle(new Style.Builder().fromUri("asset://" + key), onStyleLoadedCallback);
+    } else {
+      mapLibreMap.setStyle(new Style.Builder().fromUri(styleString), onStyleLoadedCallback);
+    }
+  }
+
+
+
+  @SuppressWarnings({"MissingPermission"})
+  private void enableLocationComponent(@NonNull Style style) {
+    if (manualLocationSource || hasLocationPermission()) {
+
+      locationComponent = mapLibreMap.getLocationComponent();
+
+      LocationComponentActivationOptions.Builder optionsBuilder =
+              LocationComponentActivationOptions
+                      .builder(context, style)
+                      .locationComponentOptions(buildLocationComponentOptions(style));
+      if (manualLocationSource) {
+        // App-provided locations: disable the native engine. Updates arrive via
+        // locationComponent#setManualLocation -> forceLocationUpdate(location).
+        optionsBuilder.useDefaultLocationEngine(false);
+      } else {
+        optionsBuilder.locationEngine(myLocationEngineFactory.getLocationEngine(context));
+      }
+
+      locationComponent.activateLocationComponent(optionsBuilder.build());
+      locationComponent.setLocationComponentEnabled(true);
+      locationComponent.setMaxAnimationFps(30);
+      updateMyLocationTrackingMode();
+      updateMyLocationRenderMode();
+      locationComponent.addOnCameraTrackingChangedListener(this);
+    } else {
+      Log.e(TAG, "missing location permissions");
+    }
+  }
+
+  private void updateLocationComponentLayer() {
+    if (locationComponent != null && locationComponentRequiresUpdate()) {
+      locationComponent.applyStyle(buildLocationComponentOptions(style));
+    }
+  }
+
+  private void clearLocationComponentLayer() {
+    if (locationComponent != null) {
+      locationComponent.applyStyle(buildLocationComponentOptions(null));
+    }
+  }
+
+  String getLastLayerOnStyle(Style style) {
+    if (style == null) return null;
+    if (!style.isFullyLoaded()) {
+        Log.d(TAG, "getLastLayerOnStyle: style not fully loaded yet");
+        return null;
+    }
+    
+    final List<Layer> layers = style.getLayers();
+    if (layers.size() > 0) {
+      return layers.get(layers.size() - 1).getId();
+    }
+
+    return null;
+  }
+
+  /// only update if the last layer is not the mapbox-location-bearing-layer
+  boolean locationComponentRequiresUpdate() {
+    final String lastLayerId = getLastLayerOnStyle(style);
+    return lastLayerId != null && !lastLayerId.equals("mapbox-location-bearing-layer");
+  }
+
+  private LocationComponentOptions buildLocationComponentOptions(Style style) {
+    final LocationComponentOptions.Builder optionsBuilder =
+        LocationComponentOptions.builder(context);
+    optionsBuilder.trackingGesturesManagement(true);
+
+    final String lastLayerId = getLastLayerOnStyle(style);
+    if (lastLayerId != null) {
+      optionsBuilder.layerAbove(lastLayerId);
+    }
+    return optionsBuilder.build();
+  }
+
+  private void onUserLocationUpdate(Location location) {
+    if (location == null) {
+      return;
+    }
+
+    final Map<String, Object> userLocation = new HashMap<>(6);
+    userLocation.put("position", new double[] {location.getLatitude(), location.getLongitude()});
+    userLocation.put("speed", location.getSpeed());
+    userLocation.put("altitude", location.getAltitude());
+    userLocation.put("bearing", location.getBearing());
+    userLocation.put("speed", location.getSpeed());
+    userLocation.put("horizontalAccuracy", location.getAccuracy());
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      userLocation.put(
+          "verticalAccuracy",
+          (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+              ? location.getVerticalAccuracyMeters()
+              : null);
+    }
+    userLocation.put("timestamp", location.getTime());
+
+    final Map<String, Object> arguments = new HashMap<>(1);
+    arguments.put("userLocation", userLocation);
+    methodChannel.invokeMethod("map#onUserLocationUpdated", arguments);
+  }
+
+  // Returns a reply map carrying the layer's MapLibre style-spec JSON under
+  // "properties" (the layer entry from the serialized style: id/type/source/
+  // paint/layout/...), or an empty map if the layer is absent. Reading the
+  // serialized style avoids enumerating every typed getter and guarantees the
+  // result matches the style spec, like the iOS and web implementations.
+  private Map<String, Object> getLayerProperties(String layerId) {
+    Map<String, Object> reply = new HashMap<>();
+    JsonObject styleJson = JsonParser.parseString(style.getJson()).getAsJsonObject();
+    JsonArray layers = styleJson.getAsJsonArray("layers");
+    if (layers != null) {
+      for (JsonElement element : layers) {
+        JsonObject layer = element.getAsJsonObject();
+        JsonElement id = layer.get("id");
+        if (id != null && layerId.equals(id.getAsString())) {
+          reply.put("properties", layer.toString());
+          break;
+        }
+      }
+    }
+    return reply;
+  }
+
+  // Same as getLayerProperties but for sources, which the style spec keys by id
+  // under the "sources" object rather than storing in an array.
+  private Map<String, Object> getSourceProperties(String sourceId) {
+    Map<String, Object> reply = new HashMap<>();
+    JsonObject styleJson = JsonParser.parseString(style.getJson()).getAsJsonObject();
+    JsonObject sources = styleJson.getAsJsonObject("sources");
+    if (sources != null && sources.has(sourceId)) {
+      reply.put("properties", sources.getAsJsonObject(sourceId).toString());
+    }
+    return reply;
+  }
+
+  // Resolves the source a feature-state call addresses, or replies with a
+  // descriptive error and returns null so the caller can just bail out.
+  //
+  // The Android SDK exposes feature state on the source objects themselves
+  // (there is no MapLibreMap-level entry point), and only GeoJsonSource and
+  // VectorSource carry the API. On a vector source every call is additionally
+  // scoped to a source layer, so a missing sourceLayer would leave the call
+  // with nothing to address; that is rejected here once instead of in each
+  // method-channel case.
+  private Source getFeatureStateCapableSource(
+      String sourceId, String sourceLayer, MethodChannel.Result result) {
+    if (style == null || !style.isFullyLoaded()) {
+      result.error(
+          "STYLE_NOT_READY",
+          "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+          null);
+      return null;
+    }
+    final Source source = style.getSource(sourceId);
+    if (source == null) {
+      result.error(
+          "SOURCE_NOT_FOUND",
+          "Source '" + sourceId + "' does not exist in the current style.",
+          null);
+      return null;
+    }
+    if (source instanceof VectorSource) {
+      if (sourceLayer == null) {
+        result.error(
+            "SOURCE_LAYER_REQUIRED",
+            "Source '"
+                + sourceId
+                + "' is a vector source, so feature state calls on it require a 'sourceLayer'.",
+            null);
+        return null;
+      }
+      return source;
+    }
+    if (source instanceof GeoJsonSource) {
+      return source;
+    }
+    result.error(
+        "UNSUPPORTED_SOURCE_TYPE",
+        "Source '"
+            + sourceId
+            + "' is a "
+            + source.getClass().getSimpleName()
+            + ". Feature state only applies to GeoJSON and vector sources.",
+        null);
+    return null;
+  }
+
+  // Resolves the GeoJSON source a cluster-inspection call addresses, or replies
+  // with a descriptive error and returns null so the caller can just bail out.
+  //
+  // Clustering is a GeoJSON source feature, and the Android SDK exposes the
+  // inspection methods on GeoJsonSource only.
+  private GeoJsonSource getClusterCapableSource(
+      String sourceId, String methodName, MethodChannel.Result result) {
+    if (style == null || !style.isFullyLoaded()) {
+      result.error(
+          "STYLE_NOT_READY",
+          "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+          null);
+      return null;
+    }
+    final Source source = style.getSource(sourceId);
+    if (source == null) {
+      result.error(
+          "SOURCE_NOT_FOUND",
+          "Source '" + sourceId + "' does not exist in the current style.",
+          null);
+      return null;
+    }
+    if (source instanceof GeoJsonSource) {
+      return (GeoJsonSource) source;
+    }
+    result.error(
+        "UNSUPPORTED_SOURCE_TYPE",
+        "Source '"
+            + sourceId
+            + "' is a "
+            + source.getClass().getSimpleName()
+            + ". "
+            + methodName
+            + " only applies to clustered GeoJSON sources.",
+        null);
+    return null;
+  }
+
+  // Builds the argument the SDK's cluster methods take.
+  //
+  // They are declared as taking a Feature, but everything below them reads a
+  // single property off it: the JNI layer copies properties.cluster_id and the
+  // renderer looks up that id in the source's supercluster index, ignoring the
+  // geometry and every other property. A minimal point feature carrying the id
+  // is therefore the whole input, which is what lets the Dart API be an int.
+  private static Feature clusterFeature(long clusterId) {
+    final JsonObject properties = new JsonObject();
+    properties.addProperty("cluster_id", clusterId);
+    return Feature.fromGeometry(Point.fromLngLat(0, 0), properties);
+  }
+
+  // Serializes features for the channel as JSON strings, so nested properties
+  // survive intact. Shared by every call that answers with features:
+  // map#queryRenderedFeatures, map#querySourceFeatures and the cluster calls.
+  private static Map<String, Object> featuresReply(List<Feature> features) {
+    final List<String> featuresJson = new ArrayList<>();
+    if (features != null) {
+      for (Feature feature : features) {
+        featuresJson.add(feature.toJson());
+      }
+    }
+    final Map<String, Object> reply = new HashMap<>();
+    reply.put("features", featuresJson);
+    return reply;
+  }
+
+  // The cluster calls answer with a FeatureCollection, which is null when the
+  // id matches nothing.
+  private static Map<String, Object> featuresReply(FeatureCollection collection) {
+    return featuresReply(collection == null ? null : collection.features());
+  }
+
+  private FeatureCollection parseGeoJsonToFeatureCollection(String geojson) {
+    JsonElement jsonElement = JsonParser.parseString(geojson);
+    String type = jsonElement.getAsJsonObject().get("type").getAsString();
+
+    if ("FeatureCollection".equals(type)) {
+      return FeatureCollection.fromJson(geojson);
+    } else if ("Feature".equals(type)) {
+      Feature feature = Feature.fromJson(geojson);
+      return FeatureCollection.fromFeatures(new Feature[]{ feature });
+    }
+
+    return null;
+  }
+
+  private void addGeoJsonSource(String sourceName, String source) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addGeoJsonSource: style not ready, skipping");
+      return;
+    }
+
+    // Check if source already exists to prevent CannotAddSourceException
+    // which can lead to native crashes
+    if (style.getSource(sourceName) != null) {
+      return;
+    }
+
+    try {
+      FeatureCollection featureCollection = parseGeoJsonToFeatureCollection(source);
+      if (featureCollection == null) {
+        Log.w(TAG, "addGeoJsonSource: unsupported GeoJSON type, skipping");
+        return;
+      }
+
+      // synchronousUpdate causes a texture atlas slot-reuse bug in MapLibre Native Android SDK
+      // that silently discards icons registered via addImage() in the same render frame.
+      // Disabled unconditionally until upstream maplibre-native#4326 is fixed.
+      GeoJsonOptions options = new GeoJsonOptions().withSynchronousUpdate(false);
+      GeoJsonSource geoJsonSource = new GeoJsonSource(sourceName, featureCollection, options);
+      addedFeaturesByLayer.put(sourceName, featureCollection);
+
+      style.addSource(geoJsonSource);
+    } catch (Exception e) {
+      Log.e(TAG, "addGeoJsonSource: error adding source '" + sourceName + "'", e);
+    }
+  }
+
+  private void setGeoJsonSource(String sourceName, String geojson) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "setGeoJsonSource: style not ready, skipping update");
+      return;
+    }
+
+    try {
+      FeatureCollection featureCollection = parseGeoJsonToFeatureCollection(geojson);
+      if (featureCollection == null) {
+        Log.w(TAG, "setGeoJsonSource: unsupported GeoJSON type, skipping update");
+        return;
+      }
+
+      GeoJsonSource geoJsonSource = style.getSourceAs(sourceName);
+      if (geoJsonSource == null) {
+        Log.w(TAG, "setGeoJsonSource: source '" + sourceName + "' not found, skipping update");
+        return;
+      }
+
+      addedFeaturesByLayer.put(sourceName, featureCollection);
+      geoJsonSource.setGeoJson(featureCollection);
+    } catch (Exception e) {
+      Log.e(TAG, "setGeoJsonSource: error updating source '" + sourceName + "'", e);
+    }
+  }
+
+  private void setGeoJsonFeature(String sourceName, String geojsonFeature) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "setGeoJsonFeature: style not ready, skipping update");
+      return;
+    }
+
+    try {
+      Feature feature = Feature.fromJson(geojsonFeature);
+      FeatureCollection featureCollection = addedFeaturesByLayer.get(sourceName);
+      GeoJsonSource geoJsonSource = style.getSourceAs(sourceName);
+
+      if (featureCollection != null && geoJsonSource != null) {
+        final String featureId = feature.id();
+        final List<Feature> features = featureCollection.features();
+        
+        if (featureId != null && features != null) {
+          for (int i = 0; i < features.size(); i++) {
+            if (featureId.equals(features.get(i).id())) {
+              features.set(i, feature);
+              break;
+            }
+          }
+        }
+
+        geoJsonSource.setGeoJson(featureCollection);
+      }
+    } catch (Exception e) {
+      Log.e(TAG, "setGeoJsonFeature: error updating feature in source '" + sourceName + "'", e);
+    }
+  }
+
+  private boolean addSymbolLayer(
+      String layerName,
+      String sourceName,
+      String belowLayerId,
+      String sourceLayer,
+      Float minZoom,
+      Float maxZoom,
+      PropertyValue[] properties,
+      boolean enableInteraction,
+      Expression filter) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addSymbolLayer: style not ready, skipping");
+      return false;
+    }
+    SymbolLayer symbolLayer = new SymbolLayer(layerName, sourceName);
+    symbolLayer.setProperties(properties);
+    if (sourceLayer != null) {
+      symbolLayer.setSourceLayer(sourceLayer);
+    }
+    if (minZoom != null) {
+      symbolLayer.setMinZoom(minZoom);
+    }
+    if (maxZoom != null) {
+      symbolLayer.setMaxZoom(maxZoom);
+    }
+    if (filter != null) {
+      symbolLayer.setFilter(filter);
+    }
+    if (belowLayerId != null) {
+      style.addLayerBelow(symbolLayer, belowLayerId);
+    } else {
+      style.addLayer(symbolLayer);
+    }
+    if (enableInteraction) {
+      interactiveFeatureLayerIds.add(layerName);
+    }
+    return true;
+  }
+
+  private boolean addLineLayer(
+      String layerName,
+      String sourceName,
+      String belowLayerId,
+      String sourceLayer,
+      Float minZoom,
+      Float maxZoom,
+      PropertyValue[] properties,
+      boolean enableInteraction,
+      Expression filter) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addLineLayer: style not ready, skipping");
+      return false;
+    }
+    LineLayer lineLayer = new LineLayer(layerName, sourceName);
+    lineLayer.setProperties(properties);
+    if (sourceLayer != null) {
+      lineLayer.setSourceLayer(sourceLayer);
+    }
+    if (minZoom != null) {
+      lineLayer.setMinZoom(minZoom);
+    }
+    if (maxZoom != null) {
+      lineLayer.setMaxZoom(maxZoom);
+    }
+    if (filter != null) {
+      lineLayer.setFilter(filter);
+    }
+    if (belowLayerId != null) {
+      style.addLayerBelow(lineLayer, belowLayerId);
+    } else {
+      style.addLayer(lineLayer);
+    }
+    if (enableInteraction) {
+      interactiveFeatureLayerIds.add(layerName);
+    }
+    return true;
+  }
+
+  private boolean addFillLayer(
+      String layerName,
+      String sourceName,
+      String belowLayerId,
+      String sourceLayer,
+      Float minZoom,
+      Float maxZoom,
+      PropertyValue[] properties,
+      boolean enableInteraction,
+      Expression filter) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addFillLayer: style not ready, skipping");
+      return false;
+    }
+    FillLayer fillLayer = new FillLayer(layerName, sourceName);
+    fillLayer.setProperties(properties);
+    if (sourceLayer != null) {
+      fillLayer.setSourceLayer(sourceLayer);
+    }
+    if (minZoom != null) {
+      fillLayer.setMinZoom(minZoom);
+    }
+    if (maxZoom != null) {
+      fillLayer.setMaxZoom(maxZoom);
+    }
+    if (filter != null) {
+      fillLayer.setFilter(filter);
+    }
+    if (belowLayerId != null) {
+      style.addLayerBelow(fillLayer, belowLayerId);
+    } else {
+      style.addLayer(fillLayer);
+    }
+    if (enableInteraction) {
+      interactiveFeatureLayerIds.add(layerName);
+    }
+    return true;
+  }
+
+  private boolean addFillExtrusionLayer(
+          String layerName,
+          String sourceName,
+          String belowLayerId,
+          String sourceLayer,
+          Float minZoom,
+          Float maxZoom,
+          PropertyValue[] properties,
+          boolean enableInteraction,
+          Expression filter) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addFillExtrusionLayer: style not ready, skipping");
+      return false;
+    }
+    FillExtrusionLayer fillLayer = new FillExtrusionLayer(layerName, sourceName);
+    fillLayer.setProperties(properties);
+    if (sourceLayer != null) {
+      fillLayer.setSourceLayer(sourceLayer);
+    }
+    if (minZoom != null) {
+      fillLayer.setMinZoom(minZoom);
+    }
+    if (maxZoom != null) {
+      fillLayer.setMaxZoom(maxZoom);
+    }
+    if (filter != null) {
+      fillLayer.setFilter(filter);
+    }
+    if (belowLayerId != null) {
+      style.addLayerBelow(fillLayer, belowLayerId);
+    } else {
+      style.addLayer(fillLayer);
+    }
+    if (enableInteraction) {
+      interactiveFeatureLayerIds.add(layerName);
+    }
+    return true;
+  }
+
+  private boolean addCircleLayer(
+      String layerName,
+      String sourceName,
+      String belowLayerId,
+      String sourceLayer,
+      Float minZoom,
+      Float maxZoom,
+      PropertyValue[] properties,
+      boolean enableInteraction,
+      Expression filter) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addCircleLayer: style not ready, skipping");
+      return false;
+    }
+    CircleLayer circleLayer = new CircleLayer(layerName, sourceName);
+    circleLayer.setProperties(properties);
+    if (sourceLayer != null) {
+      circleLayer.setSourceLayer(sourceLayer);
+    }
+    if (minZoom != null) {
+      circleLayer.setMinZoom(minZoom);
+    }
+    if (maxZoom != null) {
+      circleLayer.setMaxZoom(maxZoom);
+    }
+    if (filter != null) {
+      circleLayer.setFilter(filter);
+    }
+    if (belowLayerId != null) {
+      style.addLayerBelow(circleLayer, belowLayerId);
+    } else {
+      style.addLayer(circleLayer);
+    }
+    if (enableInteraction) {
+      interactiveFeatureLayerIds.add(layerName);
+    }
+    return true;
+  }
+
+  private Expression parseFilter(String filter) {
+    JsonParser parser = new JsonParser();
+    JsonElement filterJsonElement = parser.parse(filter);
+    return filterJsonElement.isJsonNull() ? null : Expression.Converter.convert(filterJsonElement);
+  }
+
+  private boolean addRasterLayer(
+      String layerName,
+      String sourceName,
+      Float minZoom,
+      Float maxZoom,
+      String belowLayerId,
+      PropertyValue[] properties,
+      Expression filter) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addRasterLayer: style not ready, skipping");
+      return false;
+    }
+    RasterLayer layer = new RasterLayer(layerName, sourceName);
+    layer.setProperties(properties);
+    if (minZoom != null) {
+      layer.setMinZoom(minZoom);
+    }
+    if (maxZoom != null) {
+      layer.setMaxZoom(maxZoom);
+    }
+    if (belowLayerId != null) {
+      style.addLayerBelow(layer, belowLayerId);
+    } else {
+      style.addLayer(layer);
+    }
+    return true;
+  }
+
+  private boolean addHillshadeLayer(
+      String layerName,
+      String sourceName,
+      Float minZoom,
+      Float maxZoom,
+      String belowLayerId,
+      PropertyValue[] properties,
+      Expression filter) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addHillshadeLayer: style not ready, skipping");
+      return false;
+    }
+    HillshadeLayer layer = new HillshadeLayer(layerName, sourceName);
+    layer.setProperties(properties);
+    if (minZoom != null) {
+      layer.setMinZoom(minZoom);
+    }
+    if (maxZoom != null) {
+      layer.setMaxZoom(maxZoom);
+    }
+    if (belowLayerId != null) {
+      style.addLayerBelow(layer, belowLayerId);
+    } else {
+      style.addLayer(layer);
+    }
+    return true;
+  }
+
+  private boolean addColorReliefLayer(
+      String layerName,
+      String sourceName,
+      Float minZoom,
+      Float maxZoom,
+      String belowLayerId,
+      PropertyValue[] properties,
+      Expression filter) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addColorReliefLayer: style not ready, skipping");
+      return false;
+    }
+    ColorReliefLayer layer = new ColorReliefLayer(layerName, sourceName);
+    layer.setProperties(properties);
+    if (minZoom != null) {
+      layer.setMinZoom(minZoom);
+    }
+    if (maxZoom != null) {
+      layer.setMaxZoom(maxZoom);
+    }
+    if (belowLayerId != null) {
+      style.addLayerBelow(layer, belowLayerId);
+    } else {
+      style.addLayer(layer);
+    }
+    return true;
+  }
+
+  private boolean addBackgroundLayer(
+      String layerName,
+      Float minZoom,
+      Float maxZoom,
+      String belowLayerId,
+      PropertyValue[] properties) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addBackgroundLayer: style not ready, skipping");
+      return false;
+    }
+    BackgroundLayer layer = new BackgroundLayer(layerName);
+    layer.setProperties(properties);
+    if (minZoom != null) {
+      layer.setMinZoom(minZoom);
+    }
+    if (maxZoom != null) {
+      layer.setMaxZoom(maxZoom);
+    }
+    if (belowLayerId != null) {
+      style.addLayerBelow(layer, belowLayerId);
+    } else {
+      style.addLayer(layer);
+    }
+    return true;
+  }
+
+
+
+  private boolean addHeatmapLayer(
+      String layerName,
+      String sourceName,
+      Float minZoom,
+      Float maxZoom,
+      String belowLayerId,
+      PropertyValue[] properties,
+      Expression filter) {
+    if (style == null || !style.isFullyLoaded()) {
+      Log.w(TAG, "addHeatmapLayer: style not ready, skipping");
+      return false;
+    }
+    HeatmapLayer layer = new HeatmapLayer(layerName, sourceName);
+    layer.setProperties(properties);
+    if (minZoom != null) {
+      layer.setMinZoom(minZoom);
+    }
+    if (maxZoom != null) {
+      layer.setMaxZoom(maxZoom);
+    }
+    if (belowLayerId != null) {
+      style.addLayerBelow(layer, belowLayerId);
+    } else {
+      style.addLayer(layer);
+    }
+    return true;
+  }
+
+  private Pair<Feature, String> firstFeatureOnLayers(RectF in) {
+    if (style == null) return null;
+    if (!style.isFullyLoaded()) {
+        Log.d(TAG, "firstFeatureOnLayers: style not fully loaded yet");
+        return null;
+    }
+    
+    final List<Layer> layers;
+    try {
+      layers = style.getLayers();
+    } catch (IllegalStateException ex) {
+      // Style object is stale (a new style is loading/has loaded). Skip querying.
+      Log.w(TAG, "firstFeatureOnLayers: Style.getLayers() failed: " + ex.getMessage());
+      return null;
+    }
+    final List<String> layersInOrder = new ArrayList<String>();
+    for (Layer layer : layers) {
+      String id = layer.getId();
+      if (interactiveFeatureLayerIds.contains(id)) layersInOrder.add(id);
+    }
+    Collections.reverse(layersInOrder);
+    for (String id : layersInOrder) {
+      List<Feature> features = mapLibreMap.queryRenderedFeatures(in, id);
+      if (!features.isEmpty()) {
+        return new Pair<Feature, String>(features.get(0), id);
+      }
+    }
+    
+    return null;
+  }
+
+  @Override
+  public void onMethodCall(MethodCall call, MethodChannel.Result result) {
+    switch (call.method) {
+      case "map#waitForMap":
+        if (mapLibreMap != null) {
+          result.success(null);
+          return;
+        }
+        mapReadyResult = result;
+        break;
+      case "map#update":
+        {
+          // Almost every option setter below goes through mapLibreMap, which is
+          // null while the MapView is being rebuilt after activity recreation.
+          // Answer like the map-touching cases do rather than reading it blind.
+          if (mapLibreMap == null) {
+            result.error(
+                "MAP_NOT_READY", "Map is not ready (activity may have been recreated)", null);
+            break;
+          }
+          Convert.interpretMapLibreMapOptions(call.argument("options"), this, context);
+          result.success(Convert.toJson(getCameraPosition()));
+          break;
+        }
+      // Dart-driven pause/resume. Only flips MapView state when it's actually out
+      // of sync with the request, so we never double-call onPause/onResume against
+      // the natural Activity lifecycle (which the lifecycle observer handles).
+      case "map#pause":
+        userPaused = true;
+        if (!disposed && mapView != null && mapViewResumed) {
+          mapView.onPause();
+          mapViewResumed = false;
+        }
+        result.success(null);
+        break;
+      case "map#resume":
+        userPaused = false;
+        if (!disposed
+            && mapView != null
+            && !mapViewResumed
+            && boundLifecycle != null
+            && boundLifecycle.getCurrentState().isAtLeast(Lifecycle.State.RESUMED)) {
+          mapView.onResume();
+          mapViewResumed = true;
+        }
+        result.success(null);
+        break;
+      // All cases below require a live mapLibreMap. If the map is being recreated
+      // (e.g. after "Don't keep activities") we stash the result so the Flutter
+      // side gets its answer once onMapReady fires again.
+      default:
+        if (mapLibreMap == null) {
+          result.error("MAP_NOT_READY", "Map is not ready (activity may have been recreated)", null);
+          return;
+        }
+        onMethodCallWithMap(call, result);
+        return;
+    }
+  }
+
+  private void onMethodCallWithMap(MethodCall call, MethodChannel.Result result) {
+    switch (call.method) {
+      case "map#updateMyLocationTrackingMode":
+        {
+          int myLocationTrackingMode = call.argument("mode");
+          setMyLocationTrackingMode(myLocationTrackingMode);
+          result.success(null);
+          break;
+        }
+      case "map#matchMapLanguageWithDeviceDefault":
+        {
+          try {
+            final Locale deviceLocale = Locale.getDefault();
+            MapLibreMapUtils.setMapLanguage(mapLibreMap, deviceLocale.getLanguage());
+
+            result.success(null);
+          } catch (RuntimeException exception) {
+            Log.d(TAG, exception.toString());
+            result.error("MAPBOX LOCALIZATION PLUGIN ERROR", exception.toString(), null);
+          }
+          break;
+        }
+      case "map#updateContentInsets":
+        {
+          HashMap<String, Object> insets = call.argument("bounds");
+          final CameraUpdate cameraUpdate =
+              CameraUpdateFactory.paddingTo(
+                  Convert.toPixels(insets.get("left"), density),
+                  Convert.toPixels(insets.get("top"), density),
+                  Convert.toPixels(insets.get("right"), density),
+                  Convert.toPixels(insets.get("bottom"), density));
+
+          if (call.argument("animated")) {
+            animateCamera(cameraUpdate, null, result);
+          } else {
+            moveCamera(cameraUpdate, result);
+          }
+          break;
+        }
+      case "map#setMapLanguage":
+        {
+          final String language = call.argument("language");
+          try {
+            MapLibreMapUtils.setMapLanguage(mapLibreMap, language);
+
+            result.success(null);
+          } catch (RuntimeException exception) {
+            Log.d(TAG, exception.toString());
+            result.error("MAPBOX LOCALIZATION PLUGIN ERROR", exception.toString(), null);
+          }
+          break;
+        }
+      case "map#getVisibleRegion":
+        {
+          Map<String, Object> reply = new HashMap<>();
+          VisibleRegion visibleRegion = mapLibreMap.getProjection().getVisibleRegion();
+          reply.put(
+              "sw",
+              Arrays.asList(
+                  visibleRegion.latLngBounds.getLatSouth(), visibleRegion.latLngBounds.getLonWest()));
+          reply.put(
+              "ne",
+              Arrays.asList(
+                    visibleRegion.latLngBounds.getLatNorth(), visibleRegion.latLngBounds.getLonEast()));
+
+          result.success(reply);
+          break;
+        }
+      case "map#toScreenLocation":
+        {
+          Map<String, Object> reply = new HashMap<>();
+          PointF pointf =
+              mapLibreMap
+                  .getProjection()
+                  .toScreenLocation(
+                      new LatLng(call.argument("latitude"), call.argument("longitude")));
+          reply.put("x", pointf.x);
+          reply.put("y", pointf.y);
+          result.success(reply);
+          break;
+        }
+      case "map#toScreenLocationBatch":
+        {
+          double[] param = (double[]) call.argument("coordinates");
+          double[] reply = new double[param.length];
+
+          for (int i = 0; i < param.length; i += 2) {
+            PointF pointf =
+                mapLibreMap.getProjection().toScreenLocation(new LatLng(param[i], param[i + 1]));
+            reply[i] = pointf.x;
+            reply[i + 1] = pointf.y;
+          }
+
+          result.success(reply);
+          break;
+        }
+      case "map#toLatLng":
+        {
+          Map<String, Object> reply = new HashMap<>();
+          LatLng latlng =
+              mapLibreMap
+                  .getProjection()
+                  .fromScreenLocation(
+                      new PointF(
+                          ((Double) call.argument("x")).floatValue(),
+                          ((Double) call.argument("y")).floatValue()));
+          reply.put("latitude", latlng.getLatitude());
+          reply.put("longitude", latlng.getLongitude());
+          result.success(reply);
+          break;
+        }
+      case "map#getMetersPerPixelAtLatitude":
+        {
+          Map<String, Object> reply = new HashMap<>();
+          Double retVal =
+              mapLibreMap
+                  .getProjection()
+                  .getMetersPerPixelAtLatitude((Double) call.argument("latitude"));
+          reply.put("metersperpixel", retVal);
+          result.success(reply);
+          break;
+        }
+      case "camera#move":
+        {
+          final CameraUpdate cameraUpdate =
+              Convert.toCameraUpdate(call.argument("cameraUpdate"), mapLibreMap, density);
+          if (cameraUpdate != null) {
+            // camera transformation not handled yet
+            mapLibreMap.moveCamera(
+                cameraUpdate,
+                new OnCameraMoveFinishedListener() {
+                  @Override
+                  public void onFinish() {
+                    super.onFinish();
+                    result.success(true);
+                  }
+
+                  @Override
+                  public void onCancel() {
+                    super.onCancel();
+                    result.success(false);
+                  }
+                });
+
+            // moveCamera(cameraUpdate);
+          } else {
+            result.success(false);
+          }
+          break;
+        }
+      case "camera#animate":
+        {
+          final CameraUpdate cameraUpdate =
+              Convert.toCameraUpdate(call.argument("cameraUpdate"), mapLibreMap, density);
+          final Integer duration = call.argument("duration");
+
+          final OnCameraMoveFinishedListener onCameraMoveFinishedListener =
+              new OnCameraMoveFinishedListener() {
+                @Override
+                public void onFinish() {
+                  super.onFinish();
+                  result.success(true);
+                }
+
+                @Override
+                public void onCancel() {
+                  super.onCancel();
+                  result.success(false);
+                }
+              };
+          if (cameraUpdate != null && duration != null) {
+            // camera transformation not handled yet
+            mapLibreMap.animateCamera(cameraUpdate, duration, onCameraMoveFinishedListener);
+          } else if (cameraUpdate != null) {
+            // camera transformation not handled yet
+            mapLibreMap.animateCamera(cameraUpdate, onCameraMoveFinishedListener);
+          } else {
+            result.success(false);
+          }
+          break;
+        }
+      case "map#queryRenderedFeatures":
+        {
+          List<Feature> features;
+
+          List<String> layerIdsArgument = call.argument("layerIds");
+          if (layerIdsArgument == null) {
+            result.error(
+                "INVALID_ARGUMENT", "queryRenderedFeatures requires a 'layerIds' list.", null);
+            break;
+          }
+          String[] layerIds = layerIdsArgument.toArray(new String[0]);
+
+          // queryRenderedFeatures sends the filter as a list, while
+          // queryRenderedFeaturesInRect sends the same expression already
+          // encoded as a JSON string. Reading only the list shape dropped the
+          // filter for the rect call, which then answered with every feature
+          // in the rectangle.
+          Object filter = call.argument("filter");
+          JsonElement jsonElement = null;
+          if (filter instanceof String) {
+            jsonElement = JsonParser.parseString((String) filter);
+          } else if (filter != null) {
+            jsonElement = new Gson().toJsonTree(filter);
+          }
+          JsonArray jsonArray = null;
+          if (jsonElement != null && jsonElement.isJsonArray()) {
+            jsonArray = jsonElement.getAsJsonArray();
+          }
+          Expression filterExpression =
+              jsonArray == null ? null : Expression.Converter.convert(jsonArray);
+          Double x = call.argument("x");
+          Double y = call.argument("y");
+          Double left = call.argument("left");
+          Double top = call.argument("top");
+          Double right = call.argument("right");
+          Double bottom = call.argument("bottom");
+          if (x != null && y != null) {
+            PointF pixel = new PointF(x.floatValue(), y.floatValue());
+            features = mapLibreMap.queryRenderedFeatures(pixel, filterExpression, layerIds);
+          } else if (left != null && top != null && right != null && bottom != null) {
+            RectF rectF =
+                new RectF(
+                    left.floatValue(), top.floatValue(), right.floatValue(), bottom.floatValue());
+            features = mapLibreMap.queryRenderedFeatures(rectF, filterExpression, layerIds);
+          } else {
+            // Reading the coordinates blind turned a bad call into a
+            // NullPointerException, and answering with an empty list would look
+            // like a query that found nothing. Say which arguments are missing.
+            result.error(
+                "INVALID_ARGUMENT",
+                "queryRenderedFeatures requires either 'x' and 'y', or 'left', 'top', 'right' "
+                    + "and 'bottom', as numbers.",
+                null);
+            break;
+          }
+          result.success(featuresReply(features));
+          break;
+        }
+      case "map#setTelemetryEnabled":
+        {
+          result.success(null);
+          break;
+        }
+      case "map#getTelemetryEnabled":
+        {
+          result.success(false);
+          break;
+        }
+      case "map#setMaximumFps":
+        {
+          final int fps = call.argument("fps");
+          if (mapView != null) {
+            mapView.setMaximumFps(fps);
+          }
+          result.success(null);
+          break;
+        }
+      case "map#forceOnlineMode":
+        {
+          // Force online mode by setting connectivity to true
+          if (mapView != null) {
+            ConnectivityReceiver.instance(mapView.getContext()).setConnected(true);
+          }
+          result.success(null);
+          break;
+        }
+      case "camera#ease":
+        {
+          final CameraUpdate cameraUpdate = Convert.toCameraUpdate(call.argument("cameraUpdate"), mapLibreMap, density);
+          final Integer duration = call.argument("duration");
+          final String interpolationStr = call.argument("interpolation");
+
+          // MapLibre Android's easeCamera only exposes a boolean:
+          //   false = linear (constant velocity)
+          //   true  = default ease-in/ease-out
+          // Custom timing curves (easeOut, fastOutLinearIn) are not supported
+          // natively, so any non-"linear" value falls back to eased. This
+          // cross-platform caveat is documented on CameraAnimationInterpolation.
+          final boolean easingInterpolator = !"linear".equals(interpolationStr);
+
+          final OnCameraMoveFinishedListener onCameraMoveFinishedListener =
+              new OnCameraMoveFinishedListener() {
+                @Override
+                public void onFinish() {
+                  super.onFinish();
+                  result.success(true);
+                }
+
+                @Override
+                public void onCancel() {
+                  super.onCancel();
+                  result.success(false);
+                }
+              };
+
+          if (cameraUpdate != null && duration != null && duration > 0) {
+            mapLibreMap.easeCamera(cameraUpdate, duration, easingInterpolator, onCameraMoveFinishedListener);
+          } else if (cameraUpdate != null) {
+            mapLibreMap.easeCamera(cameraUpdate, onCameraMoveFinishedListener);
+          } else {
+            result.success(false);
+          }
+          break;
+        }
+      case "map#queryCameraPosition":
+        {
+          result.success(Convert.toJson(mapLibreMap.getCameraPosition()));
+          break;
+        }
+      case "map#editGeoJsonSource":
+        {
+          boolean ret = false;
+          if (mapLibreMap != null) {
+            Style style = mapLibreMap.getStyle();
+            if (style != null) {
+              try {
+                GeoJsonSource source = style.getSourceAs(call.argument("id"));
+                if (source != null) {
+                  source.setGeoJson((String)call.argument("data"));
+                  ret = true;
+                }
+              } catch (Exception e) {
+                Log.e(TAG, "editGeoJsonSource: error updating source '" + call.argument("id") + "'", e);
+              }
+            }
+          }
+          Map<String, Boolean> reply = new HashMap<>();
+          reply.put("result", ret);
+          result.success(reply);
+          break;
+        }
+      case "map#editGeoJsonUrl":
+        {
+          boolean ret = false;
+          if (mapLibreMap != null) {
+            Style style = mapLibreMap.getStyle();
+            if (style != null) {
+              try {
+                GeoJsonSource source = style.getSourceAs(call.argument("id"));
+                if (source != null) {
+                  source.setUrl((String)call.argument("url"));
+                  ret = true;
+                }
+              } catch (Exception e) {
+                Log.e(TAG, "editGeoJsonUrl: error updating source '" + call.argument("id") + "'", e);
+              }
+            }
+          }
+          Map<String, Boolean> reply = new HashMap<>();
+          reply.put("result", ret);
+          result.success(reply);
+          break;
+        }
+      case "map#setLayerFilter":
+        {
+          boolean ret = false;
+          if (mapLibreMap != null) {
+            Style style = mapLibreMap.getStyle();
+            if (style != null) {
+                try {
+                    Layer layer = style.getLayer(call.argument("id"));
+                    if (layer != null) {
+                        String filter = call.argument("filter");
+                        if (filter != null) {
+                            Expression expression = Expression.raw(filter);
+                            if (expression != null) {
+                              if (layer instanceof LineLayer) {
+                                ((LineLayer)layer).setFilter(expression);
+                                ret = true;
+                              } else if (layer instanceof FillLayer) {
+                                ((FillLayer)layer).setFilter(expression);
+                                ret = true;
+                              } else if (layer instanceof SymbolLayer) {
+                                ((SymbolLayer)layer).setFilter(expression);
+                                ret = true;
+                              }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+          }
+          Map<String, Boolean> reply = new HashMap<>();
+          reply.put("result", ret);
+          result.success(reply);
+          break;
+        }
+      case "map#getStyle":
+        {
+          Map<String, Object> reply = new HashMap<>();
+          boolean ret = false;
+          if (mapLibreMap != null) {
+            Style style = mapLibreMap.getStyle();
+            if (style != null) {
+              try {
+                String json = style.getJson();
+                reply.put("json", json);
+                ret = true;
+              } catch (Exception e) {}
+            }
+          }
+          reply.put("result", ret);
+          result.success(reply);
+          break;
+        }
+      case "map#setCustomHeaders":
+        {
+          if (mapLibreMap != null) {
+            HashMap<String, String> headers = (HashMap<String, String>)call.argument("headers");
+            List<String> filter = (List<String>)call.argument("filter");
+            MapLibreCustomHttpInterceptor.setCustomHeaders(headers, filter, result);
+          } else {
+            result.success(null);
+          }
+          break;
+        }
+      case "map#getCustomHeaders":
+        {
+          if (mapLibreMap != null) {
+            result.success(MapLibreCustomHttpInterceptor.CustomHeaders);
+          } else {
+            result.success(null);
+          }
+          break;
+        }
+      case "map#invalidateAmbientCache":
+        {
+          OfflineManager fileSource = OfflineManager.Companion.getInstance(context);
+
+          fileSource.invalidateAmbientCache(
+              new OfflineManager.FileSourceCallback() {
+                @Override
+                public void onSuccess() {
+                  result.success(null);
+                }
+
+                @Override
+                public void onError(@NonNull String message) {
+                  result.error("MAPBOX CACHE ERROR", message, null);
+                }
+              });
+          break;
+        }
+      case "map#clearAmbientCache":
+      {
+        OfflineManager fileSource = OfflineManager.Companion.getInstance(context);
+
+        fileSource.clearAmbientCache(
+                new OfflineManager.FileSourceCallback() {
+                  @Override
+                  public void onSuccess() {
+                    result.success(null);
+                  }
+
+                  @Override
+                  public void onError(@NonNull String message) {
+                    result.error("MAPBOX CACHE ERROR", message, null);
+                  }
+                });
+        break;
+      }
+      case "source#addGeoJson":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String geojson = call.argument("geojson");
+          addGeoJsonSource(sourceId, geojson);
+          result.success(null);
+          break;
+        }
+      case "source#setGeoJson":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String geojson = call.argument("geojson");
+          setGeoJsonSource(sourceId, geojson);
+          result.success(null);
+          break;
+        }
+      case "source#setFeature":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String geojsonFeature = call.argument("geojsonFeature");
+          setGeoJsonFeature(sourceId, geojsonFeature);
+          result.success(null);
+          break;
+        }
+      case "source#setFeatureState":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String sourceLayer = call.argument("sourceLayer");
+          final String featureId = call.argument("featureId");
+          final Map<String, Object> state = call.argument("state");
+          // Read blind these would surface as an IllegalStateException from Gson
+          // or a NullPointerException from the SDK, both reaching Dart as a bare
+          // "error" rather than something a caller can act on.
+          if (featureId == null || state == null) {
+            result.error(
+                "INVALID_ARGUMENT",
+                "setFeatureState requires a 'featureId' and a 'state' map.",
+                null);
+            break;
+          }
+          final Source source = getFeatureStateCapableSource(sourceId, sourceLayer, result);
+          if (source == null) {
+            break;
+          }
+          final JsonObject stateJson = new Gson().toJsonTree(state).getAsJsonObject();
+          final boolean applied =
+              source instanceof VectorSource
+                  ? ((VectorSource) source).setFeatureState(sourceLayer, featureId, stateJson)
+                  : ((GeoJsonSource) source).setFeatureState(featureId, stateJson);
+          if (applied) {
+            result.success(null);
+          } else {
+            // The SDK setters return false instead of throwing; surfacing that
+            // as an error keeps a rejected call from looking like a success.
+            result.error(
+                "FEATURE_STATE_NOT_APPLIED",
+                "setFeatureState for feature '"
+                    + featureId
+                    + "' on source '"
+                    + sourceId
+                    + "' was rejected by the SDK. This usually means the source is no longer attached to the map.",
+                null);
+          }
+          break;
+        }
+      case "source#removeFeatureState":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String sourceLayer = call.argument("sourceLayer");
+          final String featureId = call.argument("featureId");
+          final String stateKey = call.argument("stateKey");
+          // A stateKey lives inside one feature's state, so without a featureId
+          // there is nothing the SDK could remove it from.
+          if (featureId == null && stateKey != null) {
+            result.error(
+                "INVALID_ARGUMENT",
+                "removeFeatureState with a 'stateKey' also requires the 'featureId' that owns the key.",
+                null);
+            break;
+          }
+          final Source source = getFeatureStateCapableSource(sourceId, sourceLayer, result);
+          if (source == null) {
+            break;
+          }
+          // Which arguments are present picks the operation, matching web:
+          // both drop one key, featureId alone drops that feature's whole
+          // state, neither resets the whole source (or source layer).
+          final boolean applied;
+          if (source instanceof VectorSource) {
+            final VectorSource vectorSource = (VectorSource) source;
+            if (featureId == null) {
+              applied = vectorSource.resetFeatureStates(sourceLayer);
+            } else if (stateKey == null) {
+              applied = vectorSource.removeFeatureState(sourceLayer, featureId);
+            } else {
+              applied = vectorSource.removeFeatureState(sourceLayer, featureId, stateKey);
+            }
+          } else {
+            final GeoJsonSource geoJsonSource = (GeoJsonSource) source;
+            if (featureId == null) {
+              applied = geoJsonSource.resetFeatureStates();
+            } else if (stateKey == null) {
+              applied = geoJsonSource.removeFeatureState(featureId);
+            } else {
+              applied = geoJsonSource.removeFeatureState(featureId, stateKey);
+            }
+          }
+          if (applied) {
+            result.success(null);
+          } else {
+            result.error(
+                "FEATURE_STATE_NOT_APPLIED",
+                "removeFeatureState on source '"
+                    + sourceId
+                    + "' was rejected by the SDK. This usually means the source is no longer attached to the map.",
+                null);
+          }
+          break;
+        }
+      case "source#getFeatureState":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String sourceLayer = call.argument("sourceLayer");
+          final String featureId = call.argument("featureId");
+          final Source source = getFeatureStateCapableSource(sourceId, sourceLayer, result);
+          if (source == null) {
+            break;
+          }
+          final JsonObject stateJson =
+              source instanceof VectorSource
+                  ? ((VectorSource) source).getFeatureState(sourceLayer, featureId)
+                  : ((GeoJsonSource) source).getFeatureState(featureId);
+          // Serialized as a JSON string so nested values survive the channel
+          // intact, like style#getLayerProperties. A null state must stay null
+          // rather than become an empty map: the Dart return type is nullable
+          // and callers distinguish "no state" from an empty state.
+          final Map<String, Object> reply = new HashMap<>();
+          reply.put("state", stateJson == null ? null : stateJson.toString());
+          result.success(reply);
+          break;
+        }
+      case "source#getClusterExpansionZoom":
+        {
+          final String sourceId = call.argument("sourceId");
+          final Number clusterId = call.argument("clusterId");
+          if (clusterId == null) {
+            result.error(
+                "INVALID_ARGUMENT",
+                "getClusterExpansionZoom requires an int 'clusterId'.",
+                null);
+            break;
+          }
+          final GeoJsonSource source =
+              getClusterCapableSource(sourceId, "getClusterExpansionZoom", result);
+          if (source == null) {
+            break;
+          }
+          result.success(source.getClusterExpansionZoom(clusterFeature(clusterId.longValue())));
+          break;
+        }
+      case "source#getClusterChildren":
+        {
+          final String sourceId = call.argument("sourceId");
+          final Number clusterId = call.argument("clusterId");
+          if (clusterId == null) {
+            result.error(
+                "INVALID_ARGUMENT", "getClusterChildren requires an int 'clusterId'.", null);
+            break;
+          }
+          final GeoJsonSource source =
+              getClusterCapableSource(sourceId, "getClusterChildren", result);
+          if (source == null) {
+            break;
+          }
+          result.success(
+              featuresReply(source.getClusterChildren(clusterFeature(clusterId.longValue()))));
+          break;
+        }
+      case "source#getClusterLeaves":
+        {
+          final String sourceId = call.argument("sourceId");
+          final Number clusterId = call.argument("clusterId");
+          final Number limit = call.argument("limit");
+          final Number offset = call.argument("offset");
+          if (clusterId == null || limit == null || offset == null) {
+            result.error(
+                "INVALID_ARGUMENT",
+                "getClusterLeaves requires an int 'clusterId', 'limit' and 'offset'.",
+                null);
+            break;
+          }
+          final GeoJsonSource source =
+              getClusterCapableSource(sourceId, "getClusterLeaves", result);
+          if (source == null) {
+            break;
+          }
+          result.success(
+              featuresReply(
+                  source.getClusterLeaves(
+                      clusterFeature(clusterId.longValue()),
+                      limit.longValue(),
+                      offset.longValue())));
+          break;
+        }
+      case "symbolLayer#add":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String layerId = call.argument("layerId");
+          final String belowLayerId = call.argument("belowLayerId");
+          final String sourceLayer = call.argument("sourceLayer");
+          final Double minzoom = call.argument("minzoom");
+          final Double maxzoom = call.argument("maxzoom");
+          final String filter = call.argument("filter");
+          final boolean enableInteraction = call.argument("enableInteraction");
+          final PropertyValue[] properties =
+              LayerPropertyConverter.interpretSymbolLayerProperties(call.argument("properties"));
+
+          Expression filterExpression = parseFilter(filter);
+
+          if (!addSymbolLayer(
+              layerId,
+              sourceId,
+              belowLayerId,
+              sourceLayer,
+              minzoom != null ? minzoom.floatValue() : null,
+              maxzoom != null ? maxzoom.floatValue() : null,
+              properties,
+              enableInteraction,
+              filterExpression)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          updateLocationComponentLayer();
+
+          result.success(null);
+          break;
+        }
+      case "lineLayer#add":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String layerId = call.argument("layerId");
+          final String belowLayerId = call.argument("belowLayerId");
+          final String sourceLayer = call.argument("sourceLayer");
+          final Double minzoom = call.argument("minzoom");
+          final Double maxzoom = call.argument("maxzoom");
+          final String filter = call.argument("filter");
+          final boolean enableInteraction = call.argument("enableInteraction");
+          final PropertyValue[] properties =
+              LayerPropertyConverter.interpretLineLayerProperties(call.argument("properties"));
+
+          Expression filterExpression = parseFilter(filter);
+
+          if (!addLineLayer(
+              layerId,
+              sourceId,
+              belowLayerId,
+              sourceLayer,
+              minzoom != null ? minzoom.floatValue() : null,
+              maxzoom != null ? maxzoom.floatValue() : null,
+              properties,
+              enableInteraction,
+              filterExpression)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          updateLocationComponentLayer();
+
+          result.success(null);
+          break;
+        }
+        case "layer#setProperties": {
+          final String layerId = call.argument("layerId");
+
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                "STYLE_NOT_READY",
+                "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                null);
+            break;
+          }
+
+          Layer layer = style.getLayer(layerId);
+
+          if (layer != null) {
+            final PropertyValue[] properties;
+
+            if (layer instanceof LineLayer) {
+              properties = LayerPropertyConverter
+                  .interpretLineLayerProperties(call.argument("properties"));
+            } else if (layer instanceof FillLayer) {
+              properties = LayerPropertyConverter
+                  .interpretFillLayerProperties(call.argument("properties"));
+            } else if (layer instanceof CircleLayer) {
+              properties = LayerPropertyConverter
+                  .interpretCircleLayerProperties(call.argument("properties"));
+            } else if (layer instanceof SymbolLayer) {
+              properties = LayerPropertyConverter
+                  .interpretSymbolLayerProperties(call.argument("properties"));
+            } else if (layer instanceof RasterLayer) {
+              properties = LayerPropertyConverter
+                  .interpretRasterLayerProperties(call.argument("properties"));
+            } else if (layer instanceof FillExtrusionLayer) {
+              properties = LayerPropertyConverter
+                  .interpretFillExtrusionLayerProperties(call.argument("properties"));
+            } else if (layer instanceof HeatmapLayer) {
+              properties = LayerPropertyConverter
+                  .interpretHeatmapLayerProperties(call.argument("properties"));
+            } else if (layer instanceof HillshadeLayer) {
+              properties = LayerPropertyConverter
+                  .interpretHillshadeLayerProperties(call.argument("properties"));
+            } else if (layer instanceof ColorReliefLayer) {
+              properties = LayerPropertyConverter
+                  .interpretColorReliefLayerProperties(call.argument("properties"));
+            } else if (layer instanceof BackgroundLayer) {
+              properties = LayerPropertyConverter
+                  .interpretBackgroundLayerProperties(call.argument("properties"));
+            } else {
+              result.error("UNSUPPORTED_LAYER_TYPE", "Layer type not supported", null);
+              return;
+            }
+            layer.setProperties(properties);
+            result.success(null);
+          } else {
+            result.error("LAYER_NOT_FOUND_ERROR", "Layer " + layerId + "not found", null);
+          }
+
+          break;
+        }
+      case "fillLayer#add":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String layerId = call.argument("layerId");
+          final String belowLayerId = call.argument("belowLayerId");
+          final String sourceLayer = call.argument("sourceLayer");
+          final Double minzoom = call.argument("minzoom");
+          final Double maxzoom = call.argument("maxzoom");
+          final String filter = call.argument("filter");
+          final boolean enableInteraction = call.argument("enableInteraction");
+          final PropertyValue[] properties =
+              LayerPropertyConverter.interpretFillLayerProperties(call.argument("properties"));
+
+          Expression filterExpression = parseFilter(filter);
+
+          if (!addFillLayer(
+              layerId,
+              sourceId,
+              belowLayerId,
+              sourceLayer,
+              minzoom != null ? minzoom.floatValue() : null,
+              maxzoom != null ? maxzoom.floatValue() : null,
+              properties,
+              enableInteraction,
+              filterExpression)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          updateLocationComponentLayer();
+
+          result.success(null);
+          break;
+        }
+      case "fillExtrusionLayer#add":
+      {
+        final String sourceId = call.argument("sourceId");
+        final String layerId = call.argument("layerId");
+        final String belowLayerId = call.argument("belowLayerId");
+        final String sourceLayer = call.argument("sourceLayer");
+        final Double minzoom = call.argument("minzoom");
+        final Double maxzoom = call.argument("maxzoom");
+        final String filter = call.argument("filter");
+        final boolean enableInteraction = call.argument("enableInteraction");
+        final PropertyValue[] properties =
+                LayerPropertyConverter.interpretFillExtrusionLayerProperties(
+                        call.argument("properties"));
+
+        Expression filterExpression = parseFilter(filter);
+
+        if (!addFillExtrusionLayer(
+                layerId,
+                sourceId,
+                belowLayerId,
+                sourceLayer,
+                minzoom != null ? minzoom.floatValue() : null,
+                maxzoom != null ? maxzoom.floatValue() : null,
+                properties,
+                enableInteraction,
+                filterExpression)) {
+          result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+          break;
+        }
+        updateLocationComponentLayer();
+
+        result.success(null);
+        break;
+      }
+      case "circleLayer#add":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String layerId = call.argument("layerId");
+          final String belowLayerId = call.argument("belowLayerId");
+          final String sourceLayer = call.argument("sourceLayer");
+          final Double minzoom = call.argument("minzoom");
+          final Double maxzoom = call.argument("maxzoom");
+          final String filter = call.argument("filter");
+          final boolean enableInteraction = call.argument("enableInteraction");
+          final PropertyValue[] properties =
+              LayerPropertyConverter.interpretCircleLayerProperties(call.argument("properties"));
+
+          Expression filterExpression = parseFilter(filter);
+
+          if (!addCircleLayer(
+              layerId,
+              sourceId,
+              belowLayerId,
+              sourceLayer,
+              minzoom != null ? minzoom.floatValue() : null,
+              maxzoom != null ? maxzoom.floatValue() : null,
+              properties,
+              enableInteraction,
+              filterExpression)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          updateLocationComponentLayer();
+
+          result.success(null);
+          break;
+        }
+      case "rasterLayer#add":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String layerId = call.argument("layerId");
+          final String belowLayerId = call.argument("belowLayerId");
+          final Double minzoom = call.argument("minzoom");
+          final Double maxzoom = call.argument("maxzoom");
+          final PropertyValue[] properties =
+              LayerPropertyConverter.interpretRasterLayerProperties(call.argument("properties"));
+          if (!addRasterLayer(
+              layerId,
+              sourceId,
+              minzoom != null ? minzoom.floatValue() : null,
+              maxzoom != null ? maxzoom.floatValue() : null,
+              belowLayerId,
+              properties,
+              null)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          updateLocationComponentLayer();
+
+          result.success(null);
+          break;
+        }
+      case "hillshadeLayer#add":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String layerId = call.argument("layerId");
+          final String belowLayerId = call.argument("belowLayerId");
+          final Double minzoom = call.argument("minzoom");
+          final Double maxzoom = call.argument("maxzoom");
+          final PropertyValue[] properties =
+              LayerPropertyConverter.interpretHillshadeLayerProperties(call.argument("properties"));
+          if (!addHillshadeLayer(
+              layerId,
+              sourceId,
+              minzoom != null ? minzoom.floatValue() : null,
+              maxzoom != null ? maxzoom.floatValue() : null,
+              belowLayerId,
+              properties,
+              null)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          updateLocationComponentLayer();
+
+          result.success(null);
+          break;
+        }
+      case "colorReliefLayer#add":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String layerId = call.argument("layerId");
+          final String belowLayerId = call.argument("belowLayerId");
+          final Double minzoom = call.argument("minzoom");
+          final Double maxzoom = call.argument("maxzoom");
+          final PropertyValue[] properties =
+              LayerPropertyConverter.interpretColorReliefLayerProperties(call.argument("properties"));
+          if (!addColorReliefLayer(
+              layerId,
+              sourceId,
+              minzoom != null ? minzoom.floatValue() : null,
+              maxzoom != null ? maxzoom.floatValue() : null,
+              belowLayerId,
+              properties,
+              null)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          updateLocationComponentLayer();
+
+          result.success(null);
+          break;
+        }
+      case "backgroundLayer#add":
+        {
+          final String layerId = call.argument("layerId");
+          final String belowLayerId = call.argument("belowLayerId");
+          final Double minzoom = call.argument("minzoom");
+          final Double maxzoom = call.argument("maxzoom");
+          final PropertyValue[] properties =
+              LayerPropertyConverter.interpretBackgroundLayerProperties(call.argument("properties"));
+          // Nearly every published style already has a layer called "background", the
+          // natural id to reach for here. Report the clash the way iOS does instead of
+          // letting the SDK throw a CannotAddLayerException.
+          if (style != null && style.isFullyLoaded() && style.getLayer(layerId) != null) {
+            result.error(
+                "layerAlreadyExists",
+                "Layer already exists",
+                "Layer with id " + layerId + " already exists.");
+            break;
+          }
+          if (!addBackgroundLayer(
+              layerId,
+              minzoom != null ? minzoom.floatValue() : null,
+              maxzoom != null ? maxzoom.floatValue() : null,
+              belowLayerId,
+              properties)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          updateLocationComponentLayer();
+
+          result.success(null);
+          break;
+        }
+      case "style#setLight":
+        {
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                "STYLE_NOT_READY",
+                "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                null);
+            break;
+          }
+          final Map<String, Object> lightProperties = call.argument("light");
+          final Light light = style.getLight();
+          // Every LightProperties field is dynamic, so anything can arrive here. The
+          // values are checked rather than cast: MapLibre Native takes constants only,
+          // and an expression is a List, which would leave onMethodCall as a bare
+          // ClassCastException.
+          final String constantsOnly =
+              " MapLibre Native takes constant light values only, not expressions.";
+          final Object anchor = lightProperties.get("anchor");
+          if (anchor != null) {
+            if (!(anchor instanceof String)) {
+              result.error(
+                  "INVALID_ARGUMENT", "Invalid 'anchor' in 'light'." + constantsOnly, null);
+              break;
+            }
+            light.setAnchor((String) anchor);
+          }
+          final Object position = lightProperties.get("position");
+          if (position != null) {
+            final List<?> values = position instanceof List ? (List<?>) position : null;
+            if (values == null
+                || values.size() != 3
+                || !(values.get(0) instanceof Number)
+                || !(values.get(1) instanceof Number)
+                || !(values.get(2) instanceof Number)) {
+              result.error(
+                  "INVALID_ARGUMENT",
+                  "Invalid 'position' in 'light'. Expected three numbers, [radial, azimuthal,"
+                      + " polar]."
+                      + constantsOnly,
+                  null);
+              break;
+            }
+            light.setPosition(
+                new Position(
+                    ((Number) values.get(0)).floatValue(),
+                    ((Number) values.get(1)).floatValue(),
+                    ((Number) values.get(2)).floatValue()));
+          }
+          final Object color = lightProperties.get("color");
+          if (color != null) {
+            if (!(color instanceof String)) {
+              result.error("INVALID_ARGUMENT", "Invalid 'color' in 'light'." + constantsOnly, null);
+              break;
+            }
+            light.setColor((String) color);
+          }
+          final Object intensity = lightProperties.get("intensity");
+          if (intensity != null) {
+            if (!(intensity instanceof Number)) {
+              result.error(
+                  "INVALID_ARGUMENT", "Invalid 'intensity' in 'light'." + constantsOnly, null);
+              break;
+            }
+            light.setIntensity(((Number) intensity).floatValue());
+          }
+          result.success(null);
+          break;
+        }
+      case "heatmapLayer#add":
+        {
+          final String sourceId = call.argument("sourceId");
+          final String layerId = call.argument("layerId");
+          final String belowLayerId = call.argument("belowLayerId");
+          final Double minzoom = call.argument("minzoom");
+          final Double maxzoom = call.argument("maxzoom");
+          final PropertyValue[] properties =
+              LayerPropertyConverter.interpretHeatmapLayerProperties(call.argument("properties"));
+          if (!addHeatmapLayer(
+              layerId,
+              sourceId,
+              minzoom != null ? minzoom.floatValue() : null,
+              maxzoom != null ? maxzoom.floatValue() : null,
+              belowLayerId,
+              properties,
+              null)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          updateLocationComponentLayer();
+
+          result.success(null);
+          break;
+        }
+      case "locationComponent#getLastLocation":
+        {
+          Log.e(TAG, "location component: getLastLocation");
+          if (this.myLocationEnabled
+              && manualLocationSource
+              && locationComponent != null
+              && locationComponent.isLocationComponentActivated()) {
+            // Manual mode has no location engine; read the last forced location.
+            Location lastLocation = locationComponent.getLastKnownLocation();
+            if (lastLocation != null) {
+              Map<String, Object> reply = new HashMap<>();
+              reply.put("latitude", lastLocation.getLatitude());
+              reply.put("longitude", lastLocation.getLongitude());
+              reply.put("altitude", lastLocation.getAltitude());
+              result.success(reply);
+            } else {
+              result.error("LOCATION_UNAVAILABLE",
+                  "Last location is not available", null);
+            }
+          } else if (this.myLocationEnabled
+              && locationComponent != null
+              && locationComponent.isLocationComponentActivated()
+              && locationComponent.getLocationEngine() != null) {
+            Map<String, Object> reply = new HashMap<>();
+
+            mapLibreMap.getLocationComponent().getLocationEngine().getLastLocation(
+                new LocationEngineCallback<LocationEngineResult>() {
+                  @Override
+                  public void onSuccess(LocationEngineResult locationEngineResult) {
+                    Location lastLocation = locationEngineResult.getLastLocation();
+                    if (lastLocation != null) {
+                      reply.put("latitude", lastLocation.getLatitude());
+                      reply.put("longitude", lastLocation.getLongitude());
+                      reply.put("altitude", lastLocation.getAltitude());
+                      result.success(reply);
+                    } else {
+                      result.error("LOCATION_UNAVAILABLE",
+                          "Last location is not available", null);
+                    }
+                  }
+
+                  @Override
+                  public void onFailure(@NonNull Exception exception) {
+                    result.error("LOCATION_ENGINE_FAILURE",
+                        "Failed to get last location: " + exception.getMessage(), null);
+                  }
+                });
+          } else {
+            result.error("LOCATION_DISABLED",
+                "Location is disabled or location component is unavailable", null);
+          }
+          break;
+        }
+        // Pitches the camera through the location component instead of the regular
+        // camera API. MapLibreMap#animateCamera and friends notify the SDK's
+        // developer-animation listeners, which the location component answers by
+        // dropping to CameraMode.NONE, so a plain camera call would end tracking and
+        // report a dismissal. LocationComponent#tiltWhileTracking feeds the same
+        // animator that drives tracking, so the camera mode is left alone.
+      case "locationComponent#setTrackingCameraOptions":
+        {
+          if (locationComponent == null || !locationComponent.isLocationComponentActivated()) {
+            result.error(
+                "LOCATION_COMPONENT_NOT_READY",
+                "The location component is not ready. Ensure the map was created with "
+                    + "myLocationEnabled: true.",
+                null);
+            break;
+          }
+          if (locationComponent.getCameraMode() == CameraMode.NONE) {
+            result.error(
+                "TRACKING_NOT_ACTIVE",
+                "A tracking mode other than MyLocationTrackingMode.none must be active "
+                    + "before a tracking camera option can be applied.",
+                null);
+            break;
+          }
+          final Object tilt = call.argument("tilt");
+          if (!(tilt instanceof Number)) {
+            result.error("INVALID_ARGUMENT", "Missing or invalid 'tilt'.", null);
+            break;
+          }
+          final Object duration = call.argument("duration");
+          final MapLibreMap.CancelableCallback callback =
+              new MapLibreMap.CancelableCallback() {
+                @Override
+                public void onCancel() {
+                  // Either superseded by a newer tracking-camera animation, or refused
+                  // because the camera mode was still transitioning. The tilt is not
+                  // guaranteed to have been applied, so report that rather than success.
+                  result.success(false);
+                }
+
+                @Override
+                public void onFinish() {
+                  result.success(true);
+                }
+              };
+          if (duration instanceof Number) {
+            locationComponent.tiltWhileTracking(
+                ((Number) tilt).doubleValue(), ((Number) duration).longValue(), callback);
+          } else {
+            // Three-argument overload only; the two-argument one takes no callback, and
+            // the SDK's own default duration is not public.
+            locationComponent.tiltWhileTracking(
+                ((Number) tilt).doubleValue(), DEFAULT_TRACKING_TILT_DURATION_MS, callback);
+          }
+          break;
+        }
+      case "locationComponent#setManualLocation":
+        {
+          if (locationComponent == null || !locationComponent.isLocationComponentActivated()) {
+            result.error(
+                "LOCATION_COMPONENT_NOT_READY",
+                "The location component is not ready. Ensure the map was created with "
+                    + "myLocationEnabled: true and locationSource: ManualLocationSource().",
+                null);
+            break;
+          }
+          if (!manualLocationSource) {
+            result.error(
+                "MANUAL_LOCATION_SOURCE_DISABLED",
+                "Manual locations require locationSource: ManualLocationSource().",
+                null);
+            break;
+          }
+          final List<?> position = (List<?>) call.argument("position");
+          if (position == null || position.size() < 2) {
+            result.error("INVALID_ARGUMENT", "Missing or invalid 'position'.", null);
+            break;
+          }
+          final Location location = new Location("ManualLocationSource");
+          location.setLatitude(((Number) position.get(0)).doubleValue());
+          location.setLongitude(((Number) position.get(1)).doubleValue());
+          final Object altitude = call.argument("altitude");
+          if (altitude != null) {
+            location.setAltitude(((Number) altitude).doubleValue());
+          }
+          final Object bearing = call.argument("bearing");
+          if (bearing != null) {
+            location.setBearing(((Number) bearing).floatValue());
+          }
+          final Object speed = call.argument("speed");
+          if (speed != null) {
+            location.setSpeed(((Number) speed).floatValue());
+          }
+          final Object horizontalAccuracy = call.argument("horizontalAccuracy");
+          if (horizontalAccuracy != null) {
+            location.setAccuracy(((Number) horizontalAccuracy).floatValue());
+          }
+          final Object verticalAccuracy = call.argument("verticalAccuracy");
+          if (verticalAccuracy != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            location.setVerticalAccuracyMeters(((Number) verticalAccuracy).floatValue());
+          }
+          final Object timestamp = call.argument("timestamp");
+          if (timestamp != null) {
+            location.setTime(((Number) timestamp).longValue());
+          }
+          locationComponent.forceLocationUpdate(location);
+          // Keep map#onUserLocationUpdated firing, mirroring the engine path.
+          onUserLocationUpdate(location);
+          result.success(null);
+          break;
+        }
+      case "style#addImage":
+        {
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                "STYLE_NOT_READY",
+                "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                null);
+            break;
+          }
+          BitmapFactory.Options options = new BitmapFactory.Options();
+          options.inScaled = false;
+          options.inDensity = 0;
+          options.inTargetDensity = 0;
+          Bitmap bitmap = BitmapFactory.decodeByteArray(
+              call.argument("bytes"),
+              0,
+              call.argument("length"),
+              options);
+          if (bitmap == null) {
+            result.error("INVALID_IMAGE", "Failed to decode image bytes.", null);
+            break;
+          }
+          style.addImage(
+              call.argument("name"),
+              bitmap,
+              call.argument("sdf"));
+          result.success(null);
+          break;
+        }
+      case "style#addImageSource":
+        {
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                "STYLE_NOT_READY",
+                "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                null);
+            break;
+          }
+          List<LatLng> coordinates = Convert.toLatLngList(call.argument("coordinates"), false);
+          Bitmap addSourceBitmap = BitmapFactory.decodeByteArray(
+              call.argument("bytes"),
+              0,
+              call.argument("length"));
+          if (addSourceBitmap == null) {
+            result.error("INVALID_IMAGE", "Failed to decode image bytes.", null);
+            break;
+          }
+          style.addSource(
+              new ImageSource(
+                  call.argument("imageSourceId"),
+                  new LatLngQuad(
+                      coordinates.get(0),
+                      coordinates.get(1),
+                      coordinates.get(2),
+                      coordinates.get(3)),
+                  addSourceBitmap));
+          result.success(null);
+          break;
+        }
+        case "style#updateImageSource":
+        {
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                "STYLE_NOT_READY",
+                "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                null);
+            break;
+          }
+          ImageSource imageSource = style.getSourceAs(call.argument("imageSourceId"));
+          List<LatLng> coordinates = Convert.toLatLngList(call.argument("coordinates"), false);
+          if (coordinates != null) {
+            imageSource.setCoordinates(
+                new LatLngQuad(
+                    coordinates.get(0),
+                    coordinates.get(1),
+                    coordinates.get(2),
+                    coordinates.get(3)));
+          }
+          byte[] bytes = call.argument("bytes");
+          if (bytes != null) {
+            Bitmap updateBitmap = BitmapFactory.decodeByteArray(bytes, 0, call.argument("length"));
+            if (updateBitmap == null) {
+              result.error("INVALID_IMAGE", "Failed to decode image bytes.", null);
+              break;
+            }
+            imageSource.setImage(updateBitmap);
+          }
+          result.success(null);
+          break;
+        }
+      case "style#addSource":
+        {
+          final String id = Convert.toString(call.argument("sourceId"));
+          final Map<String, Object> properties = (Map<String, Object>) call.argument("properties");
+          SourcePropertyConverter.addSource(id, properties, style);
+          result.success(null);
+          break;
+        }
+
+      case "style#removeSource":
+        {
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                "STYLE_NOT_READY",
+                "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                null);
+            break;
+          }
+          style.removeSource((String) call.argument("sourceId"));
+          result.success(null);
+          break;
+        }
+      case "style#addLayer":
+        {
+          if (!addRasterLayer(
+              call.argument("imageLayerId"),
+              call.argument("imageSourceId"),
+              call.argument("minzoom") != null
+                  ? ((Double) call.argument("minzoom")).floatValue()
+                  : null,
+              call.argument("maxzoom") != null
+                  ? ((Double) call.argument("maxzoom")).floatValue()
+                  : null,
+              null,
+              new PropertyValue[] {},
+              null)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          result.success(null);
+          break;
+        }
+      case "style#addLayerBelow":
+        {
+          if (!addRasterLayer(
+              call.argument("imageLayerId"),
+              call.argument("imageSourceId"),
+              call.argument("minzoom") != null
+                  ? ((Double) call.argument("minzoom")).floatValue()
+                  : null,
+              call.argument("maxzoom") != null
+                  ? ((Double) call.argument("maxzoom")).floatValue()
+                  : null,
+              call.argument("belowLayerId"),
+              new PropertyValue[] {},
+              null)) {
+            result.error("STYLE_NOT_READY", "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?", null);
+            break;
+          }
+          result.success(null);
+          break;
+        }
+      case "style#removeLayer":
+        {
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                "STYLE_NOT_READY",
+                "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                null);
+            break;
+          }
+          String layerId = call.argument("layerId");
+          style.removeLayer(layerId);
+          interactiveFeatureLayerIds.remove(layerId);
+
+          result.success(null);
+          break;
+        }
+      case "map#setCameraBounds":
+        {
+          double west = call.argument("west");
+          double north = call.argument("north");
+          double south = call.argument("south");
+          double east = call.argument("east");
+
+          int padding = call.argument("padding");
+
+          LatLng locationOne = new LatLng(north, east);
+          LatLng locationTwo = new LatLng(south, west);
+          LatLngBounds latLngBounds = new LatLngBounds.Builder()
+                  .include(locationOne) // Northeast
+                  .include(locationTwo) // Southwest
+                  .build();
+          mapLibreMap.easeCamera(CameraUpdateFactory.newLatLngBounds(latLngBounds,
+                  padding), 200);
+
+          break;
+        }
+      case "style#setFilter":
+        {
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                "STYLE_NOT_READY",
+                "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                null);
+            break;
+          }
+          String layerId = call.argument("layerId");
+          String filter = call.argument("filter");
+
+          Layer layer = style.getLayer(layerId);
+
+          JsonParser parser = new JsonParser();
+          JsonElement jsonElement = parser.parse(filter);
+          Expression expression = Expression.Converter.convert(jsonElement);
+
+          if (layer instanceof CircleLayer) {
+            ((CircleLayer) layer).setFilter(expression);
+          } else if (layer instanceof FillExtrusionLayer) {
+            ((FillExtrusionLayer) layer).setFilter(expression);
+          } else if (layer instanceof FillLayer) {
+            ((FillLayer) layer).setFilter(expression);
+          } else if (layer instanceof HeatmapLayer) {
+            ((HeatmapLayer) layer).setFilter(expression);
+          } else if (layer instanceof LineLayer) {
+            ((LineLayer) layer).setFilter(expression);
+          } else if (layer instanceof SymbolLayer) {
+            ((SymbolLayer) layer).setFilter(expression);
+          } else {
+            result.error(
+                "INVALID LAYER TYPE",
+                String.format("Layer '%s' does not support filtering.", layerId),
+                null);
+            break;
+          }
+
+          result.success(null);
+          break;
+        }
+        case "style#getFilter":
+        {
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                    "STYLE_NOT_READY",
+                    "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                    null);
+            break;
+          }
+          Map<String, Object> reply = new HashMap<>();
+          String layerId = call.argument("layerId");
+          Layer layer = style.getLayer(layerId);
+
+          Expression filter;
+          if (layer instanceof CircleLayer) {
+            filter = ((CircleLayer) layer).getFilter();
+          } else if (layer instanceof FillExtrusionLayer) {
+            filter = ((FillExtrusionLayer) layer).getFilter();
+          } else if (layer instanceof FillLayer) {
+            filter = ((FillLayer) layer).getFilter();
+          } else if (layer instanceof HeatmapLayer) {
+            filter = ((HeatmapLayer) layer).getFilter();
+          } else if (layer instanceof LineLayer) {
+            filter = ((LineLayer) layer).getFilter();
+          } else if (layer instanceof SymbolLayer) {
+            filter = ((SymbolLayer) layer).getFilter();
+          } else {
+            result.error(
+                    "INVALID LAYER TYPE",
+                    String.format("Layer '%s' does not support filtering.", layerId),
+                    null);
+            break;
+          }
+
+          reply.put("filter", filter.toString());
+          result.success(reply);
+          break;
+        }
+        case "layer#setVisibility":
+        {
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                "STYLE_NOT_READY",
+                "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                null);
+            break;
+          }
+          String layerId = call.argument("layerId");
+          boolean visible = call.argument("visible");
+
+          Layer layer = style.getLayer(layerId);
+
+          if (layer != null) {
+            layer.setProperties(PropertyFactory.visibility(visible ? Property.VISIBLE : Property.NONE));
+          }
+
+          result.success(null);
+          break;
+
+        }
+        case "map#querySourceFeatures":
+        {
+          List<Feature> features;
+
+          String sourceId = (String) call.argument("sourceId");
+          if (sourceId == null) {
+            result.error(
+                "INVALID_ARGUMENT", "querySourceFeatures requires a 'sourceId' string.", null);
+            break;
+          }
+
+          // A source is resolved by id out of the style, so without a style
+          // there is no source to query. Reading it blind raised a
+          // NullPointerException, which reached the caller as a bare "error".
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                "STYLE_NOT_READY",
+                "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                null);
+            break;
+          }
+
+          String sourceLayerId = (String) call.argument("sourceLayerId");
+
+          List<Object> filter = call.argument("filter");
+          JsonElement jsonElement = filter == null ? null : new Gson().toJsonTree(filter);
+          JsonArray jsonArray = null;
+          if (jsonElement != null && jsonElement.isJsonArray()) {
+            jsonArray = jsonElement.getAsJsonArray();
+          }
+          Expression filterExpression =
+                  jsonArray == null ? null : Expression.Converter.convert(jsonArray);
+
+
+          Source source = style.getSource(sourceId);
+          if (source instanceof GeoJsonSource) {
+            features = ((GeoJsonSource) source).querySourceFeatures(filterExpression);
+          } else if (source instanceof CustomGeometrySource) {
+            features = ((CustomGeometrySource) source).querySourceFeatures(filterExpression);
+          } else if (source instanceof VectorSource && sourceLayerId != null) {
+            features = ((VectorSource) source).querySourceFeatures(new String[] {sourceLayerId}, filterExpression);
+          } else {
+            features = Collections.emptyList();
+          }
+
+          result.success(featuresReply(features));
+          break;
+        }
+        case "style#getLayerIds":
+        {
+          if (style == null || !style.isFullyLoaded()) {
+            result.error(
+                    "STYLE_NOT_READY",
+                    "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                    null);
+            break;
+          }
+          Map<String, Object> reply = new HashMap<>();
+
+          List<String> layerIds = new ArrayList<>();
+          for (Layer layer : style.getLayers()) {
+            layerIds.add(layer.getId());
+          }
+
+          reply.put("layers", layerIds);
+          result.success(reply);
+          break;
+        }
+      case "style#getSourceIds":
+      {
+        if (style == null || !style.isFullyLoaded()) {
+          result.error(
+                  "STYLE_NOT_READY",
+                  "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                  null);
+          break;
+        }
+        Map<String, Object> reply = new HashMap<>();
+
+        List<String> sourceIds = new ArrayList<>();
+        for (Source source : style.getSources()) {
+          sourceIds.add(source.getId());
+        }
+
+        reply.put("sources", sourceIds);
+        result.success(reply);
+        break;
+      }
+      case "style#getLayerProperties":
+      {
+        if (style == null || !style.isFullyLoaded()) {
+          result.error(
+                  "STYLE_NOT_READY",
+                  "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                  null);
+          break;
+        }
+        String layerId = call.argument("layerId");
+        result.success(getLayerProperties(layerId));
+        break;
+      }
+      case "style#getSourceProperties":
+      {
+        if (style == null || !style.isFullyLoaded()) {
+          result.error(
+                  "STYLE_NOT_READY",
+                  "Style is null or not fully loaded. Has onStyleLoaded() already been invoked?",
+                  null);
+          break;
+        }
+        String sourceId = call.argument("sourceId");
+        result.success(getSourceProperties(sourceId));
+        break;
+      }
+      case "style#setStyle":
+      {
+        // Getting style json, url, path etc. from the flutter side
+        String styleString = call.argument("style");
+
+        // Checking if style is null or not
+        if (styleString != null) {
+          // If style is not null setting style
+          setStyleString(styleString);
+          result.success(null);
+        } else {
+
+          // else throwing error
+          result.error(
+                  "STYLE STRING IS NULL",
+                  "The style string is null.",
+                  null
+          );
+        }
+        break;
+      }
+      case "map#takeSnapshot":
+      {
+        if (mapLibreMap == null) {
+          result.error("MAP_NOT_READY", "Map is not ready", null);
+          break;
+        }
+        String styleUrl = mapLibreMap.getStyle() != null ? mapLibreMap.getStyle().getUri() : null;
+        if (styleUrl == null) {
+          result.error("STYLE_NOT_READY", "Map style is not loaded", null);
+          break;
+        }
+        Map<String, Object> snapshotArgs = (Map<String, Object>) call.arguments;
+        Integer width = snapshotArgs != null ? (Integer) snapshotArgs.get("width") : null;
+        Integer height = snapshotArgs != null ? (Integer) snapshotArgs.get("height") : null;
+
+        int snapshotWidth = width != null ? width : mapView.getWidth();
+        int snapshotHeight = height != null ? height : mapView.getHeight();
+
+        MapSnapshotter.Options options = new MapSnapshotter.Options(snapshotWidth, snapshotHeight)
+                .withStyle(styleUrl)
+                .withCameraPosition(mapLibreMap.getCameraPosition());
+        if (activeSnapshotter != null) {
+          activeSnapshotter.cancel();
+        }
+        activeSnapshotter = new MapSnapshotter(context, options);
+        activeSnapshotter.start(new MapSnapshotter.SnapshotReadyCallback() {
+          @Override
+          public void onSnapshotReady(MapSnapshot snapshot) {
+            activeSnapshotter = null;
+            Bitmap bitmap = snapshot.getBitmap();
+            ByteArrayOutputStream stream = new ByteArrayOutputStream();
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream);
+            result.success(stream.toByteArray());
+          }
+        }, new MapSnapshotter.ErrorHandler() {
+          @Override
+          public void onError(String error) {
+            activeSnapshotter = null;
+            result.error("SNAPSHOT_ERROR", error, null);
+          }
+        });
+        break;
+      }
+      default:
+        result.notImplemented();
+    }
+  }
+
+  @Override
+  public void onCameraMoveStarted(int reason) {
+    final Map<String, Object> arguments = new HashMap<>(2);
+    boolean isGesture = reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE;
+    arguments.put("isGesture", isGesture);
+    methodChannel.invokeMethod("camera#onMoveStarted", arguments);
+  }
+
+  @Override
+  public void onCameraMove() {
+    if (!trackCameraPosition) {
+      return;
+    }
+    final Map<String, Object> arguments = new HashMap<>(2);
+    arguments.put("position", Convert.toJson(mapLibreMap.getCameraPosition()));
+    methodChannel.invokeMethod("camera#onMove", arguments);
+  }
+
+  @Override
+  public void onCameraIdle() {
+    final Map<String, Object> arguments = new HashMap<>(2);
+    if (trackCameraPosition) {
+      arguments.put("position", Convert.toJson(mapLibreMap.getCameraPosition()));
+    }
+    methodChannel.invokeMethod("camera#onIdle", arguments);
+  }
+
+  @Override
+  public void onCameraTrackingChanged(int currentMode) {
+    final Map<String, Object> arguments = new HashMap<>(2);
+    switch (currentMode) {
+        case CameraMode.NONE:
+            arguments.put("mode", 0);
+            break;
+        case CameraMode.TRACKING:
+            arguments.put("mode", 1);
+            break;
+        case CameraMode.TRACKING_COMPASS:
+            arguments.put("mode", 2);
+            break;
+        case CameraMode.TRACKING_GPS:
+            arguments.put("mode", 3);
+            break;
+        default:
+            Log.e(TAG, "Unable to map " + currentMode + " to a tracking mode");
+            return;
+    }
+
+    methodChannel.invokeMethod("map#onCameraTrackingChanged", arguments);
+  }
+
+  @Override
+  public void onCameraTrackingDismissed() {
+    this.myLocationTrackingMode = 0;
+    methodChannel.invokeMethod("map#onCameraTrackingDismissed", new HashMap<>());
+  }
+
+  @Override
+  public void onDidBecomeIdle() {
+    methodChannel.invokeMethod("map#onIdle", new HashMap<>());
+  }
+
+  @Override
+  public boolean onMapClick(@NonNull LatLng point) {
+    PointF pointf = mapLibreMap.getProjection().toScreenLocation(point);
+    RectF rectF = new RectF(pointf.x - 10, pointf.y - 10, pointf.x + 10, pointf.y + 10);
+    Pair<Feature, String> featureLayerPair = firstFeatureOnLayers(rectF);
+    final Map<String, Object> arguments = new HashMap<>();
+    arguments.put("x", pointf.x);
+    arguments.put("y", pointf.y);
+    arguments.put("lng", point.getLongitude());
+    arguments.put("lat", point.getLatitude());
+    if (featureLayerPair != null && featureLayerPair.first != null) {
+      arguments.put("layerId", featureLayerPair.second);
+      arguments.put("id", featureLayerPair.first.id());
+      methodChannel.invokeMethod("feature#onTap", arguments);
+      // Fire map#onMapClick only if featureTapsTriggersMapClick is true
+      if (featureTapsTriggersMapClick) {
+        methodChannel.invokeMethod("map#onMapClick", arguments);
+      }
+    } else {
+      // Always fire map#onMapClick when no feature is tapped
+      methodChannel.invokeMethod("map#onMapClick", arguments);
+    }
+    return true;
+  }
+
+  @Override
+  public boolean onMapLongClick(@NonNull LatLng point) {
+    PointF pointf = mapLibreMap.getProjection().toScreenLocation(point);
+    final Map<String, Object> arguments = new HashMap<>(5);
+    arguments.put("x", pointf.x);
+    arguments.put("y", pointf.y);
+    arguments.put("lng", point.getLongitude());
+    arguments.put("lat", point.getLatitude());
+    methodChannel.invokeMethod("map#onMapLongClick", arguments);
+    return true;
+  }
+
+  @Override
+  public void dispose() {
+    if (disposed) {
+      return;
+    }
+    disposed = true;
+    if (activeSnapshotter != null) {
+      activeSnapshotter.cancel();
+      activeSnapshotter = null;
+    }
+    methodChannel.setMethodCallHandler(null);
+    // A map#waitForMap parked while the map was still being built is only ever
+    // answered by onMapReady, which will not fire now. Answer it here, or the Dart
+    // side keeps awaiting initPlatform: onMapCreated never fires and everything
+    // waiting on the controller waits forever. Only dispose() does this; a MapView
+    // torn down for an activity recreation is rebuilt and does reach onMapReady.
+    if (mapReadyResult != null) {
+      mapReadyResult.error(
+          "MAP_DISPOSED", "The map was disposed before it finished being created", null);
+      mapReadyResult = null;
+    }
+    // destroyMapViewIfNecessary drives the full pause -> stop -> destroy sequence,
+    // gated by the mapViewResumed/Started/Created flags so each step fires at most
+    // once. No manual onPause/onStop dance needed here.
+    destroyMapViewIfNecessary();
+    unregisterFromLifecycle();
+
+    try {
+      applicationContext.unregisterComponentCallbacks(this);
+    } catch (Exception e) {
+      // Ignore if already unregistered
+    }
+  }
+
+  private void moveCamera(CameraUpdate cameraUpdate, MethodChannel.Result result) {
+    if (cameraUpdate != null) {
+      // camera transformation not handled yet
+      mapLibreMap.moveCamera(
+          cameraUpdate,
+          new OnCameraMoveFinishedListener() {
+            @Override
+            public void onFinish() {
+              super.onFinish();
+              result.success(true);
+            }
+
+            @Override
+            public void onCancel() {
+              super.onCancel();
+              result.success(false);
+            }
+          });
+
+      // moveCamera(cameraUpdate);
+    } else {
+      result.success(false);
+    }
+  }
+
+  private void animateCamera(
+      CameraUpdate cameraUpdate, Integer duration, MethodChannel.Result result) {
+    final OnCameraMoveFinishedListener onCameraMoveFinishedListener =
+        new OnCameraMoveFinishedListener() {
+          @Override
+          public void onFinish() {
+            super.onFinish();
+            result.success(true);
+          }
+
+          @Override
+          public void onCancel() {
+            super.onCancel();
+            result.success(false);
+          }
+        };
+    if (cameraUpdate != null && duration != null) {
+      // camera transformation not handled yet
+      mapLibreMap.animateCamera(cameraUpdate, duration, onCameraMoveFinishedListener);
+    } else if (cameraUpdate != null) {
+      // camera transformation not handled yet
+      mapLibreMap.animateCamera(cameraUpdate, onCameraMoveFinishedListener);
+    } else {
+      result.success(false);
+    }
+  }
+
+  /**
+   * Destroy the {@link MapView} and clean up listeners.
+   *
+   * <p>It's very important to call {@code mapViewContainer.removeView(mapView)} to make
+   * sure that {@link TextureView#onDetachedFromWindowInternal()} is called, which
+   * releases the underlying surface. This is required due to a FlutterEngine change
+   * introduced between Flutter 2.10.5 and 3.10.0 where {@code removeView} is no longer
+   * called on a PlatformView automatically.
+   *
+   * <p>The teardown drives the MapView lifecycle backwards using the
+   * {@code mapViewResumed/Started/Created} flags, so each step fires at most once
+   * regardless of whether dispose, lifecycle-onDestroy, or a manual detach got here
+   * first. Before destroying, MapLibre's internal state is persisted into
+   * {@link #savedMapViewState} so a subsequent {@link #recreateMapViewIfNecessary()}
+   * can restore it.
+   *
+   * <p>For more information see:
+   * <a href="https://github.com/flutter/flutter/issues/107297">Flutter issue</a>,
+   * <a href="https://github.com/flutter/engine/commit/8dc7cd1b1a33b5da561ac859cdcc49705ad1e598">the
+   * Flutter Engine commit that introduced the issue</a>, and
+   * <a href="https://github.com/maplibre/flutter-maplibre-gl/issues/182">the
+   * MapLibre tracking issue</a>.
+   */
+  private void destroyMapViewIfNecessary() {
+    if (mapView == null) {
+      return;
+    }
+
+    if (locationComponent != null) {
+      locationComponent.setLocationComponentEnabled(false);
+    }
+    stopListeningForLocationUpdates();
+
+    // Persist MapView state so it can be restored when a new MapView is created
+    // (e.g. across "Don't keep activities" or rotation).
+    if (mapViewCreated) {
+      try {
+        mapView.onSaveInstanceState(savedMapViewState);
+      } catch (Exception e) {
+        Log.w(TAG, "mapView.onSaveInstanceState failed", e);
+      }
+    }
+
+    mapViewContainer.removeView(mapView);
+
+    if (mapViewResumed) {
+      mapView.onPause();
+      mapViewResumed = false;
+    }
+    if (mapViewStarted) {
+      mapView.onStop();
+      mapViewStarted = false;
+    }
+    if (mapViewCreated) {
+      mapView.onDestroy();
+      mapViewCreated = false;
+    }
+
+    mapLibreMap = null;
+    style = null;
+    locationComponent = null;
+    mapView = null;
+  }
+
+  // -- Lifecycle observer ----------------------------------------------------
+  //
+  // Each transition below mutates the MapView at most once per instance. Jetpack's
+  // Lifecycle.addObserver replays missed events synchronously when we subscribe to a
+  // fresh activity Lifecycle, and without the guards that replay would re-call
+  // onCreate / onStart / onResume on an already initialized MapView.
+
+  @Override
+  public void onCreate(@NonNull LifecycleOwner owner) {
+    if (disposed || mapView == null || mapViewCreated) {
+      return;
+    }
+    // savedMapViewState is empty on first launch and populated on subsequent
+    // recreations via destroyMapViewIfNecessary().
+    mapView.onCreate(savedMapViewState);
+    mapViewCreated = true;
+  }
+
+  @Override
+  public void onStart(@NonNull LifecycleOwner owner) {
+    if (disposed || mapView == null || mapViewStarted) {
+      return;
+    }
+    mapView.onStart();
+    mapViewStarted = true;
+  }
+
+  @Override
+  public void onResume(@NonNull LifecycleOwner owner) {
+    if (disposed || mapView == null || mapViewResumed) {
+      return;
+    }
+    if (userPaused) {
+      // Dart has explicitly paused rendering. Stay paused until resumeMap() is
+      // called, even though the host activity is in the foreground.
+      return;
+    }
+    mapView.onResume();
+    mapViewResumed = true;
+    if (myLocationEnabled) {
+      startListeningForLocationUpdates();
+    }
+    // Force a repaint to fix invisible map when returning from background.
+    // The runnable is dispatched after the message loop drains, by which time
+    // dispose() may have nulled mapView (e.g. a map hosted in a Dialog or
+    // BottomSheet that is dismissed mid-resume). Re-check disposed/mapView
+    // inside the runnable to mirror the guard at the top of onResume.
+    mapView.post(new Runnable() {
+      @Override
+      public void run() {
+        if (disposed || mapView == null) {
+          return;
+        }
+        mapView.invalidate();
+      }
+    });
+  }
+
+  @Override
+  public void onPause(@NonNull LifecycleOwner owner) {
+    if (disposed || mapView == null || !mapViewResumed) {
+      return;
+    }
+    mapView.onPause();
+    mapViewResumed = false;
+  }
+
+  @Override
+  public void onStop(@NonNull LifecycleOwner owner) {
+    if (disposed || mapView == null || !mapViewStarted) {
+      return;
+    }
+    mapView.onStop();
+    mapViewStarted = false;
+  }
+
+  @Override
+  public void onDestroy(@NonNull LifecycleOwner owner) {
+    if (owner.getLifecycle() != boundLifecycle) {
+      // Stale callback from an old activity (e.g. after config change where we already
+      // rebound to the new lifecycle). Ignore it: destroying now would kill the live map.
+      return;
+    }
+    unregisterFromLifecycle();
+    if (disposed) {
+      return;
+    }
+    saveCameraPosition();
+    destroyMapViewIfNecessary();
+  }
+
+  @Override
+  public void onConfigurationChanged(@NonNull Configuration newConfig) {
+    this.density = context.getResources().getDisplayMetrics().density;
+  }
+
+  @Override
+  public void onLowMemory() {
+    if (disposed || mapView == null) {
+      return;
+    }
+    Log.w(TAG, "onLowMemory has been called, telling MapView to reduce memory usage.");
+    // Forward low memory event to MapView
+    mapView.onLowMemory();
+  }
+
+  @Override
+  public void onTrimMemory(int level) {
+    // Lifecycle methods already handle resource management
+  }
+
+  // MapLibreMapOptionsSink methods
+
+  @Override
+  public void setCameraTargetBounds(LatLngBounds bounds) {
+    this.bounds = bounds;
+    if (mapLibreMap != null) {
+      mapLibreMap.setLatLngBoundsForCameraTarget(bounds);
+    }
+  }
+
+  @Override
+  public void setLocationEngineProperties(@NotNull LocationEngineRequest locationEngineRequest) {
+    myLocationEngineFactory.initLocationComponent(context, locationComponent, locationEngineRequest);
+  }
+
+  @Override
+  public void setLocationSource(@NotNull String token) {
+    // The token -> behavior mapping lives here, native-side. Any value other
+    // than "manual" (e.g. "platform"/unknown) resolves to the default engine.
+    // Applied at component activation; runtime changes do not re-activate it.
+    this.manualLocationSource = "manual".equals(token);
+  }
+
+  @Override
+  public void setCompassEnabled(boolean compassEnabled) {
+    mapLibreMap.getUiSettings().setCompassEnabled(compassEnabled);
+  }
+
+  @Override
+  public void setTrackCameraPosition(boolean trackCameraPosition) {
+    this.trackCameraPosition = trackCameraPosition;
+  }
+
+  @Override
+  public void setRotateGesturesEnabled(boolean rotateGesturesEnabled) {
+    mapLibreMap.getUiSettings().setRotateGesturesEnabled(rotateGesturesEnabled);
+  }
+
+  @Override
+  public void setScrollGesturesEnabled(boolean scrollGesturesEnabled) {
+    mapLibreMap.getUiSettings().setScrollGesturesEnabled(scrollGesturesEnabled);
+  }
+
+  @Override
+  public void setTiltGesturesEnabled(boolean tiltGesturesEnabled) {
+    mapLibreMap.getUiSettings().setTiltGesturesEnabled(tiltGesturesEnabled);
+  }
+
+  @Override
+  public void setMinMaxZoomPreference(Float min, Float max) {
+    mapLibreMap.setMinZoomPreference(min != null ? min : MapLibreConstants.MINIMUM_ZOOM);
+    mapLibreMap.setMaxZoomPreference(max != null ? max : MapLibreConstants.MAXIMUM_ZOOM);
+  }
+
+  @Override
+  public void setZoomGesturesEnabled(boolean zoomGesturesEnabled) {
+    mapLibreMap.getUiSettings().setZoomGesturesEnabled(zoomGesturesEnabled);
+  }
+
+  @Override
+  public void setDoubleClickZoomEnabled(boolean doubleClickZoomEnabled) {
+    mapLibreMap.getUiSettings().setDoubleTapGesturesEnabled(doubleClickZoomEnabled);
+  }
+
+  @Override
+  public void setMyLocationEnabled(boolean myLocationEnabled) {
+    if (this.myLocationEnabled == myLocationEnabled) {
+      return;
+    }
+    this.myLocationEnabled = myLocationEnabled;
+    if (mapLibreMap != null) {
+      updateMyLocationEnabled();
+    }
+  }
+
+  @Override
+  public void setMyLocationTrackingMode(int myLocationTrackingMode) {
+    if (mapLibreMap != null) {
+      // ensure that location is trackable
+      updateMyLocationEnabled();
+    }
+    if (this.myLocationTrackingMode == myLocationTrackingMode) {
+      return;
+    }
+    this.myLocationTrackingMode = myLocationTrackingMode;
+    if (mapLibreMap != null && locationComponent != null) {
+      updateMyLocationTrackingMode();
+    }
+  }
+
+  @Override
+  public void setMyLocationRenderMode(int myLocationRenderMode) {
+    if (this.myLocationRenderMode == myLocationRenderMode) {
+      return;
+    }
+    this.myLocationRenderMode = myLocationRenderMode;
+    if (mapLibreMap != null && locationComponent != null) {
+      updateMyLocationRenderMode();
+    }
+  }
+
+  @Override
+  public void setLogoEnabled(boolean logoEnabled) {
+    mapLibreMap.getUiSettings().setLogoEnabled(logoEnabled);
+  }
+
+  @Override
+  public void setLogoViewGravity(int gravity) {
+    switch (gravity) {
+      case 0:
+        mapLibreMap.getUiSettings().setLogoGravity(Gravity.TOP | Gravity.START);
+        break;
+      case 1:
+        mapLibreMap.getUiSettings().setLogoGravity(Gravity.TOP | Gravity.END);
+        break;
+      default:
+      case 2:
+        mapLibreMap.getUiSettings().setLogoGravity(Gravity.BOTTOM | Gravity.START);
+        break;
+      case 3:
+        mapLibreMap.getUiSettings().setLogoGravity(Gravity.BOTTOM | Gravity.END);
+        break;
+    }
+  }
+
+  public void setLogoViewMargins(int x, int y) {
+    mapLibreMap.getUiSettings().setLogoMargins(x, 0, 0, y);
+  }
+
+  @Override
+  public void setCompassGravity(int gravity) {
+    switch (gravity) {
+      case 0:
+        mapLibreMap.getUiSettings().setCompassGravity(Gravity.TOP | Gravity.START);
+        break;
+      default:
+      case 1:
+        mapLibreMap.getUiSettings().setCompassGravity(Gravity.TOP | Gravity.END);
+        break;
+      case 2:
+        mapLibreMap.getUiSettings().setCompassGravity(Gravity.BOTTOM | Gravity.START);
+        break;
+      case 3:
+        mapLibreMap.getUiSettings().setCompassGravity(Gravity.BOTTOM | Gravity.END);
+        break;
+    }
+  }
+
+  @Override
+  public void setCompassViewMargins(int x, int y) {
+    switch (mapLibreMap.getUiSettings().getCompassGravity()) {
+      case Gravity.TOP | Gravity.START:
+        mapLibreMap.getUiSettings().setCompassMargins(x, y, 0, 0);
+        break;
+      default:
+      case Gravity.TOP | Gravity.END:
+        mapLibreMap.getUiSettings().setCompassMargins(0, y, x, 0);
+        break;
+      case Gravity.BOTTOM | Gravity.START:
+        mapLibreMap.getUiSettings().setCompassMargins(x, 0, 0, y);
+        break;
+      case Gravity.BOTTOM | Gravity.END:
+        mapLibreMap.getUiSettings().setCompassMargins(0, 0, x, y);
+        break;
+    }
+  }
+
+  @Override
+  public void setAttributionButtonGravity(int gravity) {
+    switch (gravity) {
+      case 0:
+        mapLibreMap.getUiSettings().setAttributionGravity(Gravity.TOP | Gravity.START);
+        break;
+      default:
+      case 1:
+        mapLibreMap.getUiSettings().setAttributionGravity(Gravity.TOP | Gravity.END);
+        break;
+      case 2:
+        mapLibreMap.getUiSettings().setAttributionGravity(Gravity.BOTTOM | Gravity.START);
+        break;
+      case 3:
+        mapLibreMap.getUiSettings().setAttributionGravity(Gravity.BOTTOM | Gravity.END);
+        break;
+    }
+  }
+
+  @Override
+  public void setAttributionButtonMargins(int x, int y) {
+    switch (mapLibreMap.getUiSettings().getAttributionGravity()) {
+      case Gravity.TOP | Gravity.START:
+        mapLibreMap.getUiSettings().setAttributionMargins(x, y, 0, 0);
+        break;
+      default:
+      case Gravity.TOP | Gravity.END:
+        mapLibreMap.getUiSettings().setAttributionMargins(0, y, x, 0);
+        break;
+      case Gravity.BOTTOM | Gravity.START:
+        mapLibreMap.getUiSettings().setAttributionMargins(x, 0, 0, y);
+        break;
+      case Gravity.BOTTOM | Gravity.END:
+        mapLibreMap.getUiSettings().setAttributionMargins(0, 0, x, y);
+        break;
+    }
+  }
+
+  @Override
+  public void setAttributionButtonColor(int color) {
+    attributionButtonColor = color;
+    if (mapLibreMap != null) {
+      mapLibreMap.getUiSettings().setAttributionTintColor(color);
+    }
+  }
+
+  @Override
+  public void setForegroundLoadColor(int color) {
+    // foregroundLoadColor is only useful during initial map creation
+    // not for runtime updates, so this is a no-op
+  }
+
+  @Override
+  public void setTranslucentTextureSurface(boolean translucentTextureSurface) {
+    // translucentTextureSurface is only useful during initial map creation
+    // not for runtime updates, so this is a no-op
+  }
+
+  @Override
+  public void setUseHybridComposition(boolean useHybridComposition) {
+    // useHybridComposition selects the Platform-View backing (TextureView vs SurfaceView)
+    // and is only meaningful before the map's native view has been constructed.
+    // At runtime the chosen surface is fixed, so this is a no-op.
+  }
+
+  @Override
+  public void setFeatureTapsTriggersMapClick(boolean triggers) {
+    this.featureTapsTriggersMapClick = triggers;
+  }
+
+  private void updateMyLocationEnabled() {
+    if (this.locationComponent == null && mapLibreMap.getStyle() != null && myLocationEnabled) {
+      enableLocationComponent(mapLibreMap.getStyle());
+    }
+
+    if (myLocationEnabled) {
+      startListeningForLocationUpdates();
+    } else {
+      stopListeningForLocationUpdates();
+    }
+
+    if (locationComponent != null) {
+      locationComponent.setLocationComponentEnabled(myLocationEnabled);
+    }
+  }
+
+  private void startListeningForLocationUpdates() {
+    if (locationEngineCallback == null
+        && locationComponent != null
+        && locationComponent.isLocationComponentActivated()
+        && locationComponent.getLocationEngine() != null) {
+      locationEngineCallback =
+          new LocationEngineCallback<LocationEngineResult>() {
+            @Override
+            public void onSuccess(LocationEngineResult result) {
+              onUserLocationUpdate(result.getLastLocation());
+            }
+
+            @Override
+            public void onFailure(@NonNull Exception exception) {}
+          };
+      locationComponent
+          .getLocationEngine()
+          .requestLocationUpdates(
+              locationComponent.getLocationEngineRequest(), locationEngineCallback, null);
+    }
+  }
+
+  private void stopListeningForLocationUpdates() {
+    if (locationEngineCallback != null
+        && locationComponent != null
+        && locationComponent.isLocationComponentActivated()
+        && locationComponent.getLocationEngine() != null) {
+      locationComponent.getLocationEngine().removeLocationUpdates(locationEngineCallback);
+      locationEngineCallback = null;
+    }
+  }
+
+  private void updateMyLocationTrackingMode() {
+    int[] cameraModes =
+        new int[] {
+          CameraMode.NONE, CameraMode.TRACKING, CameraMode.TRACKING_COMPASS, CameraMode.TRACKING_GPS
+        };
+    locationComponent.setCameraMode(cameraModes[this.myLocationTrackingMode]);
+  }
+
+  private void updateMyLocationRenderMode() {
+    int[] renderModes = new int[] {RenderMode.NORMAL, RenderMode.COMPASS, RenderMode.GPS};
+    locationComponent.setRenderMode(renderModes[this.myLocationRenderMode]);
+  }
+
+  private boolean hasLocationPermission() {
+    return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+            == PackageManager.PERMISSION_GRANTED
+        || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+            == PackageManager.PERMISSION_GRANTED;
+  }
+
+  private int checkSelfPermission(String permission) {
+    if (permission == null) {
+      throw new IllegalArgumentException("permission is null");
+    }
+    return context.checkPermission(
+        permission, android.os.Process.myPid(), android.os.Process.myUid());
+  }
+
+  /**
+   * Tries to find highest scale image for display type
+   *
+   * @param imageId
+   * @param density
+   * @return
+   */
+  private Bitmap getScaledImage(String imageId, float density) {
+    AssetFileDescriptor assetFileDescriptor;
+
+    // Split image path into parts.
+    List<String> imagePathList = Arrays.asList(imageId.split("/"));
+    List<String> assetPathList = new ArrayList<>();
+
+    // "On devices with a device pixel ratio of 1.8, the asset .../2.0x/my_icon.png would be chosen.
+    // For a device pixel ratio of 2.7, the asset .../3.0x/my_icon.png would be chosen."
+    // Source: https://flutter.dev/docs/development/ui/assets-and-images#resolution-aware
+    for (int i = (int) Math.ceil(density); i > 0; i--) {
+      String assetPath;
+      if (i == 1) {
+        // If density is 1.0x then simply take the default asset path
+        assetPath = MapLibreMapsPlugin.flutterAssets.getAssetFilePathByName(imageId);
+      } else {
+        // Build a resolution aware asset path as follows:
+        // <directory asset>/<ratio>/<image name>
+        // where ratio is 1.0x, 2.0x or 3.0x.
+        StringBuilder stringBuilder = new StringBuilder();
+        for (int j = 0; j < imagePathList.size() - 1; j++) {
+          stringBuilder.append(imagePathList.get(j));
+          stringBuilder.append("/");
+        }
+        stringBuilder.append(((float) i) + "x");
+        stringBuilder.append("/");
+        stringBuilder.append(imagePathList.get(imagePathList.size() - 1));
+        assetPath = MapLibreMapsPlugin.flutterAssets.getAssetFilePathByName(stringBuilder.toString());
+      }
+      // Build up a list of resolution aware asset paths.
+      assetPathList.add(assetPath);
+    }
+
+    // Iterate over asset paths and get the highest scaled asset (as a bitmap).
+    Bitmap bitmap = null;
+    for (String assetPath : assetPathList) {
+      try {
+        // Read path (throws exception if doesn't exist).
+        assetFileDescriptor = mapView.getContext().getAssets().openFd(assetPath);
+        InputStream assetStream = assetFileDescriptor.createInputStream();
+        bitmap = BitmapFactory.decodeStream(assetStream);
+        assetFileDescriptor.close(); // Close for memory
+        break; // If exists, break
+      } catch (IOException e) {
+        // Skip
+      }
+    }
+    return bitmap;
+  }
+
+  boolean onMoveBegin(MoveGestureDetector detector) {
+    // onMoveBegin gets called even during a move - move end is also not called unless this function
+    // returns
+    // true at least once. To avoid redundant queries only check for feature if the previous event
+    // was ACTION_DOWN
+    if (detector.getPreviousEvent().getActionMasked() == MotionEvent.ACTION_DOWN
+        && detector.getPointersCount() == 1) {
+      PointF pointf = detector.getFocalPoint();
+      LatLng origin = mapLibreMap.getProjection().fromScreenLocation(pointf);
+      RectF rectF = new RectF(pointf.x - 10, pointf.y - 10, pointf.x + 10, pointf.y + 10);
+      Pair<Feature, String> featureLayerPair = firstFeatureOnLayers(rectF);
+      if (featureLayerPair != null && featureLayerPair.first != null && startDragging(featureLayerPair.first, origin)) {
+        invokeFeatureDrag(pointf, "start");
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void invokeFeatureDrag(PointF pointf, String eventType) {
+    LatLng current = mapLibreMap.getProjection().fromScreenLocation(pointf);
+
+    final Map<String, Object> arguments = new HashMap<>(9);
+    arguments.put("id", draggedFeature.id());
+    arguments.put("x", pointf.x);
+    arguments.put("y", pointf.y);
+    arguments.put("originLng", dragOrigin.getLongitude());
+    arguments.put("originLat", dragOrigin.getLatitude());
+    arguments.put("currentLng", current.getLongitude());
+    arguments.put("currentLat", current.getLatitude());
+    arguments.put("eventType", eventType);
+    arguments.put("deltaLng", current.getLongitude() - dragPrevious.getLongitude());
+    arguments.put("deltaLat", current.getLatitude() - dragPrevious.getLatitude());
+    dragPrevious = current;
+    methodChannel.invokeMethod("feature#onDrag", arguments);
+  }
+
+  boolean onMove(MoveGestureDetector detector) {
+    if (draggedFeature != null) {
+      if (detector.getPointersCount() > 1) {
+        stopDragging();
+        return true;
+      }
+      PointF pointf = detector.getFocalPoint();
+      invokeFeatureDrag(pointf, "drag");
+      return false;
+    }
+    return true;
+  }
+
+  void onMoveEnd(MoveGestureDetector detector) {
+    PointF pointf = detector.getFocalPoint();
+    invokeFeatureDrag(pointf, "end");
+    stopDragging();
+  }
+
+  boolean startDragging(@NonNull Feature feature, @NonNull LatLng origin) {
+    final boolean draggable =
+        feature.hasNonNullValueForProperty("draggable")
+            ? feature.getBooleanProperty("draggable")
+            : false;
+    if (draggable) {
+      draggedFeature = feature;
+      dragPrevious = origin;
+      dragOrigin = origin;
+      return true;
+    }
+    return false;
+  }
+
+  void stopDragging() {
+    draggedFeature = null;
+    dragOrigin = null;
+    dragPrevious = null;
+  }
+
+  /** Simple Listener to listen for the status of camera movements. */
+  public class OnCameraMoveFinishedListener implements MapLibreMap.CancelableCallback {
+    @Override
+    public void onFinish() {}
+
+    @Override
+    public void onCancel() {}
+  }
+
+  private class MoveGestureListener implements MoveGestureDetector.OnMoveGestureListener {
+
+    @Override
+    public boolean onMoveBegin(MoveGestureDetector detector) {
+      return MapLibreMapController.this.onMoveBegin(detector);
+    }
+
+    @Override
+    public boolean onMove(MoveGestureDetector detector, float distanceX, float distanceY) {
+      return MapLibreMapController.this.onMove(detector);
+    }
+
+    @Override
+    public void onMoveEnd(MoveGestureDetector detector, float velocityX, float velocityY) {
+      MapLibreMapController.this.onMoveEnd(detector);
+    }
+  }
+}

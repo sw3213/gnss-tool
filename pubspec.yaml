@@ -15,6 +15,11 @@ dependencies:
   package_info_plus: ^10.2.2
   path_provider: ^2.1.6
 
+# 한글 지명이 안 보이는 문제 패치본 (packages/maplibre_gl/android/.../MapLibreMapBuilder.java)
+dependency_overrides:
+  maplibre_gl:
+    path: packages/maplibre_gl
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

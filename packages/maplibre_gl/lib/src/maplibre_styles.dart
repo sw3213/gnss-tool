@@ -1,0 +1,12 @@
+part of '../maplibre_gl.dart';
+
+/// MapLibre styles used mostly for demonstration.
+abstract class MapLibreStyles {
+  /// A very simple MapLibre demo style that shows only countries with their
+  /// boundaries.
+  static const String demo = 'https://demotiles.maplibre.org/style.json';
+
+  /// The OpenFreeMap liberty style
+  static const String openfreemapLiberty =
+      'https://tiles.openfreemap.org/styles/liberty';
+}

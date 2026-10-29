@@ -1,0 +1,311 @@
+// Copyright 2018 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+package org.maplibre.maplibregl;
+
+import android.content.Context;
+import android.view.Gravity;
+import androidx.annotation.NonNull;
+import org.maplibre.android.camera.CameraPosition;
+import org.maplibre.android.geometry.LatLngBounds;
+import org.maplibre.android.location.engine.LocationEngineRequest;
+import org.maplibre.android.maps.MapLibreMapOptions;
+import io.flutter.plugin.common.BinaryMessenger;
+
+class MapLibreMapBuilder implements MapLibreMapOptionsSink {
+  public final String TAG = getClass().getSimpleName();
+  // gnss_tool 패치: new MapLibreMapOptions()는 localIdeographFontFamily를 null로 둬서 (활성 플래그는 true)
+  // 한글·한자 같은 CJK 글자를 폰 글꼴로 그리지 못하고 글리프 서버에 요청함 -> 오프라인에선 라벨이 비어 보임.
+  // createFromAttributes()가 쓰는 기본값(sans-serif)을 그대로 지정
+  private final MapLibreMapOptions options =
+      new MapLibreMapOptions()
+          .attributionEnabled(true)
+          .logoEnabled(false)
+          .textureMode(false)
+          .localIdeographFontFamily(org.maplibre.android.constants.MapLibreConstants.DEFAULT_FONT);
+  private boolean trackCameraPosition = false;
+  private boolean myLocationEnabled = false;
+  private boolean dragEnabled = true;
+  private boolean featureTapsTriggersMapClick = false;
+  private int myLocationTrackingMode = 0;
+  private int myLocationRenderMode = 0;
+  private String styleString = "";
+  private LatLngBounds bounds = null;
+  private LocationEngineRequest locationEngineRequest = null;
+  private String locationSourceToken = "platform";
+  private boolean translucentRequested = false;
+  private boolean hybridCompositionActive = false;
+  private Integer attributionButtonColor = null;
+
+  MapLibreMapController build(
+      int id,
+      Context context,
+      BinaryMessenger messenger,
+      MapLibreMapsPlugin.LifecycleProvider lifecycleProvider) {
+
+    final MapLibreMapController controller =
+        new MapLibreMapController(
+            id, 
+            context, 
+            messenger, 
+            lifecycleProvider, 
+            options, 
+            styleString, 
+            dragEnabled, 
+            featureTapsTriggersMapClick
+        );
+    controller.init();
+    controller.setMyLocationEnabled(myLocationEnabled);
+    controller.setMyLocationTrackingMode(myLocationTrackingMode);
+    controller.setMyLocationRenderMode(myLocationRenderMode);
+    controller.setTrackCameraPosition(trackCameraPosition);
+    controller.setLocationSource(locationSourceToken);
+
+    if (null != bounds) {
+      controller.setCameraTargetBounds(bounds);
+    }
+
+    if(null != locationEngineRequest ){
+      controller.setLocationEngineProperties(locationEngineRequest);
+    }
+
+    if (null != attributionButtonColor) {
+      controller.setAttributionButtonColor(attributionButtonColor);
+    }
+
+    return controller;
+  }
+
+  public void setInitialCameraPosition(CameraPosition position) {
+    options.camera(position);
+  }
+
+  @Override
+  public void setCompassEnabled(boolean compassEnabled) {
+    options.compassEnabled(compassEnabled);
+  }
+
+  @Override
+  public void setCameraTargetBounds(@NonNull LatLngBounds bounds) {
+    this.bounds = bounds;
+  }
+
+  @Override
+  public void setStyleString(@NonNull String styleString) {
+    this.styleString = styleString;
+  }
+
+  @Override
+  public void setMinMaxZoomPreference(Float min, Float max) {
+    if (min != null) {
+      options.minZoomPreference(min);
+    }
+    if (max != null) {
+      options.maxZoomPreference(max);
+    }
+  }
+
+  @Override
+  public void setTrackCameraPosition(boolean trackCameraPosition) {
+    this.trackCameraPosition = trackCameraPosition;
+  }
+
+  @Override
+  public void setRotateGesturesEnabled(boolean rotateGesturesEnabled) {
+    options.rotateGesturesEnabled(rotateGesturesEnabled);
+  }
+
+  @Override
+  public void setScrollGesturesEnabled(boolean scrollGesturesEnabled) {
+    options.scrollGesturesEnabled(scrollGesturesEnabled);
+  }
+
+  @Override
+  public void setTiltGesturesEnabled(boolean tiltGesturesEnabled) {
+    options.tiltGesturesEnabled(tiltGesturesEnabled);
+  }
+
+  @Override
+  public void setZoomGesturesEnabled(boolean zoomGesturesEnabled) {
+    options.zoomGesturesEnabled(zoomGesturesEnabled);
+  }
+
+  @Override
+  public void setDoubleClickZoomEnabled(boolean doubleClickZoomEnabled) {
+    options.doubleTapGesturesEnabled(doubleClickZoomEnabled);
+  }
+
+  @Override
+  public void setMyLocationEnabled(boolean myLocationEnabled) {
+    this.myLocationEnabled = myLocationEnabled;
+  }
+
+  @Override
+  public void setMyLocationTrackingMode(int myLocationTrackingMode) {
+    this.myLocationTrackingMode = myLocationTrackingMode;
+  }
+
+  @Override
+  public void setMyLocationRenderMode(int myLocationRenderMode) {
+    this.myLocationRenderMode = myLocationRenderMode;
+  }
+
+  @Override
+  public void setLogoEnabled(boolean logoEnabled) {
+    options.logoEnabled(logoEnabled);
+  }
+
+  @Override
+  public void setLogoViewGravity(int gravity) {
+     switch (gravity) {
+      case 0:
+        options.logoGravity(Gravity.TOP | Gravity.START);
+        break;
+      case 1:
+        options.logoGravity(Gravity.TOP | Gravity.END);
+        break;
+      case 2:
+        options.logoGravity(Gravity.BOTTOM | Gravity.START);
+        break;
+      case 3:
+        options.logoGravity(Gravity.BOTTOM | Gravity.END);
+        break;
+    }
+  }
+
+  public void setLogoViewMargins(int x, int y) {
+    options.logoMargins(
+        new int[] {
+          (int) x, // left
+          (int) 0, // top
+          (int) 0, // right
+          (int) y, // bottom
+        });
+  }
+
+  @Override
+  public void setCompassGravity(int gravity) {
+    switch (gravity) {
+      case 0:
+        options.compassGravity(Gravity.TOP | Gravity.START);
+        break;
+      case 1:
+        options.compassGravity(Gravity.TOP | Gravity.END);
+        break;
+      case 2:
+        options.compassGravity(Gravity.BOTTOM | Gravity.START);
+        break;
+      case 3:
+        options.compassGravity(Gravity.BOTTOM | Gravity.END);
+        break;
+    }
+  }
+
+  @Override
+  public void setCompassViewMargins(int x, int y) {
+    switch (options.getCompassGravity()) {
+      case Gravity.TOP | Gravity.START:
+        options.compassMargins(new int[] {(int) x, (int) y, 0, 0});
+        break;
+        // If the application code has not specified gravity, assume the platform
+        // default for the compass which is top-right
+      default:
+      case Gravity.TOP | Gravity.END:
+        options.compassMargins(new int[] {0, (int) y, (int) x, 0});
+        break;
+      case Gravity.BOTTOM | Gravity.START:
+        options.compassMargins(new int[] {(int) x, 0, 0, (int) y});
+        break;
+      case Gravity.BOTTOM | Gravity.END:
+        options.compassMargins(new int[] {0, 0, (int) x, (int) y});
+        break;
+    }
+  }
+
+  @Override
+  public void setAttributionButtonGravity(int gravity) {
+    switch (gravity) {
+      case 0:
+        options.attributionGravity(Gravity.TOP | Gravity.START);
+        break;
+      case 1:
+        options.attributionGravity(Gravity.TOP | Gravity.END);
+        break;
+      case 2:
+        options.attributionGravity(Gravity.BOTTOM | Gravity.START);
+        break;
+      case 3:
+        options.attributionGravity(Gravity.BOTTOM | Gravity.END);
+        break;
+    }
+  }
+
+  @Override
+  public void setAttributionButtonMargins(int x, int y) {
+    switch (options.getAttributionGravity()) {
+      case Gravity.TOP | Gravity.START:
+        options.attributionMargins(new int[] {(int) x, (int) y, 0, 0});
+        break;
+      case Gravity.TOP | Gravity.END:
+        options.attributionMargins(new int[] {0, (int) y, (int) x, 0});
+        break;
+        // If the application code has not specified gravity, assume the platform
+        // default for the attribution button which is bottom left
+      default:
+      case Gravity.BOTTOM | Gravity.START:
+        options.attributionMargins(new int[] {(int) x, 0, 0, (int) y});
+        break;
+      case Gravity.BOTTOM | Gravity.END:
+        options.attributionMargins(new int[] {0, 0, (int) x, (int) y});
+        break;
+    }
+  }
+
+  @Override
+  public void setAttributionButtonColor(int color) {
+    // The tint is applied through UiSettings, which only exists once the map
+    // is ready, so stash it and forward to the controller in build().
+    this.attributionButtonColor = color;
+  }
+
+  public void setDragEnabled(boolean enabled) {
+    this.dragEnabled = enabled;
+  }
+
+  public void setFeatureTapsTriggersMapClick(boolean triggers) {
+    this.featureTapsTriggersMapClick = triggers;
+  }
+
+  @Override
+  public void setLocationEngineProperties(@NonNull LocationEngineRequest locationEngineRequest) {
+    this.locationEngineRequest = locationEngineRequest;
+  }
+
+  @Override
+  public void setLocationSource(@NonNull String token) {
+    // Store the raw token here and forward it to the controller in build();
+    // the token -> behavior mapping is resolved on the controller (native side).
+    this.locationSourceToken = token;
+  }
+
+  @Override
+  public void setForegroundLoadColor(int loadColor) {
+    options.foregroundLoadColor(loadColor);
+  }
+
+  @Override
+  public void setTranslucentTextureSurface(boolean translucentTextureSurface) {
+    this.translucentRequested = translucentTextureSurface;
+    options.translucentTextureSurface(translucentTextureSurface);
+    // textureMode must be on if EITHER a translucent surface is required OR Flutter is
+    // using Hybrid Composition (TLHC). Both are correctness requirements, not knobs.
+    options.textureMode(translucentRequested || hybridCompositionActive);
+  }
+
+  @Override
+  public void setUseHybridComposition(boolean useHybridComposition) {
+    this.hybridCompositionActive = useHybridComposition;
+    options.textureMode(translucentRequested || hybridCompositionActive);
+  }
+}
