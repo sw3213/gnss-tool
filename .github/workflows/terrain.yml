@@ -44,24 +44,33 @@ jobs:
           du -sh dem
           gdalbuildvrt -q dem.vrt dem/*.tif
 
-      - name: Contours and elevation bands
+      # gdal_contour는 CPU를 하나만 씀 -> 1°칸(DEM 파일)마다 따로 돌려 코어 수만큼 동시에 계산
+      - name: Contours (parallel per 1° tile)
         run: |
-          gdal_contour -q -a ele -i 100 -f GeoJSONSeq dem.vrt c100.geojsons
-          gdal_contour -q -a ele -i 20 -f GeoJSONSeq dem.vrt c20.geojsons
+          mkdir -p c20 c100
+          ls dem/*.tif | xargs -P "$(nproc)" -I{} sh -c '
+            n=$(basename {} .tif)
+            gdal_contour -q -a ele -i 100 -f GeoJSONSeq {} c100/$n.geojsons
+            gdal_contour -q -a ele -i 20 -f GeoJSONSeq {} c20/$n.geojsons
+            echo "done $n $(date -u +%H:%M:%S)"'
+          du -sh c20 c100
+          df -h .
+
+      - name: Elevation bands
+        run: |
           gdalwarp -q -tr 0.00083333 0.00083333 -r average dem.vrt dem90.tif
           gdal_contour -q -p -amin amin -amax amax \
             -fl 0 100 200 300 400 500 600 700 800 900 1000 1200 1400 1600 1800 2000 \
             -f GeoJSONSeq dem90.tif bands.geojsons
-          ls -la *.geojsons
-          df -h .
+          ls -la bands.geojsons
 
       - name: Vector tiles
         run: |
-          tippecanoe -q -f -o c100.pmtiles -l contour -Z10 -z11 -y ele --drop-densest-as-needed c100.geojsons
-          tippecanoe -q -f -o c20.pmtiles -l contour -Z12 -z13 -y ele --drop-densest-as-needed c20.geojsons
-          tippecanoe -q -f -o bands.pmtiles -l bands -Z5 -z13 -y amin \
+          tippecanoe -f -P -o c100.pmtiles -l contour -Z10 -z11 -y ele --drop-densest-as-needed c100/*.geojsons
+          tippecanoe -f -P -o c20.pmtiles -l contour -Z12 -z13 -y ele --drop-densest-as-needed c20/*.geojsons
+          tippecanoe -f -o bands.pmtiles -l bands -Z5 -z13 -y amin \
             --coalesce-densest-as-needed --detect-shared-borders --simplification=4 bands.geojsons
-          tile-join -q -f --no-tile-size-limit -o kr-terrain.pmtiles c100.pmtiles c20.pmtiles bands.pmtiles
+          tile-join -f --no-tile-size-limit -o kr-terrain.pmtiles c100.pmtiles c20.pmtiles bands.pmtiles
           ls -la *.pmtiles
 
       - name: Publish to release "maps"
