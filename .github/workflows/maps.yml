@@ -46,9 +46,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p out
-          # 지형(kind=terrain) 항목은 terrain.yml이 관리하므로 기존 카탈로그에서 그대로 유지
+          # 지형(terrain)·고도 격자(dem) 항목은 terrain.yml·dem.yml이 관리하므로 그대로 유지
           gh release download maps -p catalog.json -O old.json 2>/dev/null || echo '[]' > old.json
-          jq '[.[] | select(.kind == "terrain")]' old.json > out/catalog.json
+          jq '[.[] | select(.kind == "terrain" or .kind == "dem")]' old.json > out/catalog.json
           jq -c '.[]' maps/regions.json | while read -r row; do
             id=$(echo "$row" | jq -r .id)
             bbox=$(echo "$row" | jq -r '.bbox | join(",")')

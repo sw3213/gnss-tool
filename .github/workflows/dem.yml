@@ -1,0 +1,56 @@
+name: Build elevation grid
+
+# 분석용 고도 격자(kr-dem.gdem, 3초 ≈ 90 m)를 Copernicus GLO-30에서 만들어 Release "maps"에 올림.
+# 앱의 전방 경사·지형 일출·가시권 계산용 (maps/build_dem.py 형식 참고).
+# DEM: Copernicus GLO-30 © DLR e.V. 2010-2014, © Airbus Defence and Space GmbH 2014-2018,
+#      provided under COPERNICUS by the European Union and ESA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dem:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GDAL (Python)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gdal-bin python3-gdal python3-numpy jq
+
+      - name: Download Copernicus DEM tiles (Korea)
+        run: |
+          mkdir -p dem
+          for lat in 33 34 35 36 37 38; do
+            for lon in 124 125 126 127 128 129 130 131; do
+              n="Copernicus_DSM_COG_10_N${lat}_00_E${lon}_00_DEM"
+              curl -sf -o "dem/$n.tif" "https://copernicus-dem-30m.s3.amazonaws.com/$n/$n.tif" || rm -f "dem/$n.tif"
+            done
+          done
+          gdalbuildvrt -q dem.vrt dem/*.tif
+
+      - name: Build grid
+        run: |
+          python3 maps/build_dem.py dem.vrt kr-dem.gdem 124.5 33.0 132.0 38.7 3
+          ls -la kr-dem.gdem
+
+      - name: Publish to release "maps"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          size=$(stat -c %s kr-dem.gdem)
+          date=$(date -u +%Y-%m-%d)
+          gh release download maps -p catalog.json -O old.json 2>/dev/null || echo '[]' > old.json
+          jq --arg url "https://github.com/$REPO/releases/download/maps/kr-dem.gdem" \
+             --arg date "$date" --argjson size "$size" \
+             '[.[] | select(.kind != "dem")] + [{
+                id: "kr-dem", name: "대한민국 고도 데이터 (분석용)", kind: "dem",
+                bbox: [124.5, 33.0, 132.0, 38.7], url: $url, date: $date, size: $size, maxzoom: 0
+              }]' old.json > catalog.json
+          cat catalog.json
+          gh release upload maps kr-dem.gdem catalog.json --clobber
