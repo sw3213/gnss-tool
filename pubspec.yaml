@@ -1,0 +1,14 @@
+name: gnss_tool
+description: Offline GNSS and terrain tool (stage 1 - NMEA simulator and skyplot)
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.0.0 <5.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
