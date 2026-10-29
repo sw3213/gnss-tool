@@ -1,0 +1,27 @@
+name: Generate map style
+
+# Protomaps 공식 밝은 테마 스타일을 한국어 라벨로 생성해 결과물(artifact)로 올림.
+# 이 PC에는 Node가 없어서 여기서 만든 뒤 assets/map/style-light.json 으로 커밋함.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Generate
+        working-directory: maps
+        run: |
+          npm init -y >/dev/null
+          npm install @protomaps/basemaps@5
+          npm ls @protomaps/basemaps
+          node gen-style.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: style
+          path: maps/style-light.json
