@@ -102,7 +102,7 @@ class TrackRecorder {
     final b = StringBuffer()
       ..writeln('<?xml version="1.0" encoding="UTF-8"?>')
       ..writeln('<gpx version="1.1" creator="GNSS Tool" xmlns="http://www.topografix.com/GPX/1/1">')
-      ..writeln('<trk><name>$name</name><trkseg>');
+      ..writeln('<trk><name>${_xmlEscape(name)}</name><trkseg>');
     for (final p in pts) {
       b.write('<trkpt lat="${p.lat.toStringAsFixed(7)}" lon="${p.lon.toStringAsFixed(7)}">');
       if (p.alt != null) b.write('<ele>${p.alt!.toStringAsFixed(1)}</ele>');
@@ -288,3 +288,140 @@ class Guide {
         hereElev: elevation?.call(lat, lon), targetElev: elevation?.call(t.lat, t.lon));
   }
 }
+
+// ---------------- GPX 경로 따라가기 ----------------
+// 남이 만든 등산로 GPX나 내 이동 기록을 불러와 지도에 그리고, 남은 거리·이탈 여부를 계속 알려 줌.
+// "왔던 길로 돌아가기"는 내 이동 기록을 거꾸로 따라가는 것
+
+class GpxRoute {
+  final String name;
+  final List<TrackPoint> pts;
+  final List<double> cum; // 시작점부터 각 점까지 누적 거리 (m)
+  GpxRoute(this.name, this.pts) : cum = _cumulative(pts);
+
+  double get total => cum.isEmpty ? 0 : cum.last;
+
+  GpxRoute reversed() => GpxRoute('$name (되돌아가기)', pts.reversed.toList());
+
+  static List<double> _cumulative(List<TrackPoint> pts) {
+    final out = <double>[];
+    var d = 0.0;
+    for (var i = 0; i < pts.length; i++) {
+      if (i > 0) d += distanceM(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
+      out.add(d);
+    }
+    return out;
+  }
+}
+
+/// GPX 글에서 경로 점(trkpt, 없으면 rtept)과 이름을 읽음. 점이 2개 미만이면 null
+GpxRoute? parseGpx(String xml, String fallbackName) {
+  final pt = RegExp(r'<(trkpt|rtept)\b([^>]*?)(/>|>([\s\S]*?)</\1>)');
+  final attr = RegExp(r'''(lat|lon)\s*=\s*["']([-0-9.eE+]+)["']''');
+  final ele = RegExp(r'<ele>\s*([-0-9.eE+]+)\s*</ele>');
+  List<TrackPoint> read(String tag) => [
+        for (final m in pt.allMatches(xml))
+          if (m.group(1) == tag)
+            () {
+              final a = {for (final x in attr.allMatches(m.group(2)!)) x.group(1)!: double.parse(x.group(2)!)};
+              final e = m.group(4) == null ? null : ele.firstMatch(m.group(4)!);
+              return a.length == 2 ? TrackPoint(a['lat']!, a['lon']!, e == null ? null : double.parse(e.group(1)!), DateTime(0)) : null;
+            }()
+      ].whereType<TrackPoint>().toList();
+  var pts = read('trkpt');
+  if (pts.length < 2) pts = read('rtept');
+  if (pts.length < 2) return null;
+  final name = RegExp(r'<name>\s*(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?\s*</name>').firstMatch(xml)?.group(1)?.trim();
+  return GpxRoute(name == null || name.isEmpty ? fallbackName : _xmlUnescape(name), pts);
+}
+
+class RouteInfo {
+  final double off; // 경로에서 떨어진 거리 (m)
+  final double done, left; // 경로를 따라 지나온 / 남은 거리 (m)
+  final double ahead; // 경로 진행 방향 (도): 가장 가까운 곳에서 30 m 앞을 향함
+  final double toRoute; // 경로로 돌아가는 방향 (도)
+  final double climbLeft; // 남은 오르막 합 (m, 고도가 없는 GPX는 0)
+  final bool offRoute, finished;
+  const RouteInfo(this.off, this.done, this.left, this.ahead, this.toRoute, this.climbLeft, this.offRoute, this.finished);
+
+  Duration get walk => walkTime(left, climbLeft);
+}
+
+/// 경로 이탈 판정: 40 m, GPS 오차가 크면 오차 + 25 m
+double offRouteLimit(double? hAcc) => max(40.0, (hAcc ?? 0) + 25);
+
+RouteInfo routeInfo(GpxRoute r, double lat, double lon, double? hAcc) {
+  final mLat = 111320.0, mLon = 111320.0 * cos(lat * pi / 180);
+  var best = double.infinity, bestI = 0, bestT = 0.0;
+  for (var i = 0; i + 1 < r.pts.length; i++) {
+    final a = r.pts[i], b = r.pts[i + 1];
+    final ax = (a.lon - lon) * mLon, ay = (a.lat - lat) * mLat;
+    final bx = (b.lon - lon) * mLon, by = (b.lat - lat) * mLat;
+    final l2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
+    final t = l2 == 0 ? 0.0 : (((-ax) * (bx - ax) + (-ay) * (by - ay)) / l2).clamp(0.0, 1.0);
+    final px = ax + (bx - ax) * t, py = ay + (by - ay) * t;
+    final d = sqrt(px * px + py * py);
+    if (d < best) {
+      best = d;
+      bestI = i;
+      bestT = t;
+    }
+  }
+  final a = r.pts[bestI], b = r.pts[bestI + 1];
+  final pLat = a.lat + (b.lat - a.lat) * bestT, pLon = a.lon + (b.lon - a.lon) * bestT;
+  final done = r.cum[bestI] + (r.cum[bestI + 1] - r.cum[bestI]) * bestT;
+  // 30 m 앞 점으로 진행 방향
+  var j = bestI + 1;
+  while (j < r.pts.length - 1 && r.cum[j] - done < 30) {
+    j++;
+  }
+  final ahead = bearingDeg(pLat, pLon, r.pts[j].lat, r.pts[j].lon);
+  var climb = 0.0;
+  for (var k = bestI + 1; k + 1 < r.pts.length; k++) {
+    final e1 = r.pts[k].alt, e2 = r.pts[k + 1].alt;
+    if (e1 != null && e2 != null && e2 > e1) climb += e2 - e1;
+  }
+  final left = r.total - done;
+  return RouteInfo(best, done, left, ahead, bearingDeg(lat, lon, pLat, pLon), climb, best > offRouteLimit(hAcc),
+      left <= arriveRadius(hAcc) && best <= offRouteLimit(hAcc));
+}
+
+/// 지금 따라가는 경로 (앱을 다시 켜도 이어서: documents/guide/route.gpx)
+class RouteFollow {
+  final route = ValueNotifier<GpxRoute?>(null);
+  final info = ValueNotifier<RouteInfo?>(null);
+
+  Future<File> _file() async => File('${(await _dataDir('guide')).path}/route.gpx');
+
+  Future<void> load() async {
+    try {
+      final f = await _file();
+      if (f.existsSync()) route.value = parseGpx(await f.readAsString(), '경로');
+    } catch (_) {}
+  }
+
+  Future<void> start(GpxRoute r) async {
+    route.value = r;
+    info.value = null;
+    await (await _file()).writeAsString(TrackRecorder.toGpx(r.name, r.pts));
+  }
+
+  Future<void> stop() async {
+    route.value = null;
+    info.value = null;
+    final f = await _file();
+    if (f.existsSync()) f.deleteSync();
+  }
+
+  void update(double? lat, double? lon, double? hAcc) {
+    final r = route.value;
+    info.value = r == null || lat == null || lon == null ? null : routeInfo(r, lat, lon, hAcc);
+  }
+}
+
+/// 불러온 GPX 경로 보관 폴더 (documents/routes)
+Future<Directory> routesDir() => _dataDir('routes');
+
+String _xmlEscape(String s) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+String _xmlUnescape(String s) =>
+    s.replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&apos;', "'").replaceAll('&amp;', '&');

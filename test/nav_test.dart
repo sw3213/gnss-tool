@@ -61,4 +61,44 @@ void main() {
     expect(guideInfo(37.32, 127.935, 5, const NavTarget('a', 37.32032, 127.935), null).arrived, isFalse);
     expect(guideInfo(37.32, 127.935, 40, const NavTarget('a', 37.32032, 127.935), null).arrived, isTrue);
   });
+
+  test('GPX route: parse, progress along route, off-route, reverse', () {
+    // 북쪽으로 곧게 1 km (0.009°마다 약 1 km), 고도 100 -> 300 m
+    const xml = '''<?xml version="1.0"?><gpx><trk><name>치악산 A&amp;B</name><trkseg>
+      <trkpt lat="37.300" lon="128.000"><ele>100</ele></trkpt>
+      <trkpt lat="37.3045" lon="128.000"><ele>200</ele></trkpt>
+      <trkpt lat="37.309" lon="128.000"><ele>300</ele></trkpt>
+    </trkseg></trk></gpx>''';
+    final r = parseGpx(xml, 'x')!;
+    expect(r.name, '치악산 A&B');
+    expect(r.pts.length, 3);
+    expect(r.total, closeTo(1000, 10));
+
+    // 중간쯤, 경로 위
+    final mid = routeInfo(r, 37.3045, 128.0, 5);
+    expect(mid.off, lessThan(1));
+    expect(mid.done, closeTo(500, 10));
+    expect(mid.left, closeTo(500, 10));
+    expect(mid.ahead, closeTo(0, 1)); // 북쪽으로 진행
+    expect(mid.climbLeft, 100);
+    expect(mid.offRoute, isFalse);
+
+    // 동쪽으로 100 m 벗어남 -> 이탈, 경로는 서쪽
+    final off = routeInfo(r, 37.3045, 128.00113, 5);
+    expect(off.off, closeTo(100, 5));
+    expect(off.offRoute, isTrue);
+    expect(off.toRoute, closeTo(270, 2));
+
+    // 끝 근처 -> 도착
+    expect(routeInfo(r, 37.30899, 128.0, 5).finished, isTrue);
+
+    // 거꾸로 = 왔던 길로 돌아가기: 남쪽으로 진행, 오르막 없음
+    final back = routeInfo(r.reversed(), 37.3045, 128.0, 5);
+    expect(back.ahead, closeTo(180, 1));
+    expect(back.climbLeft, 0);
+
+    // 이름이 쓴 그대로 다시 읽히는지 (저장할 때 &를 이스케이프)
+    expect(parseGpx(TrackRecorder.toGpx(r.name, r.pts), 'x')!.name, '치악산 A&B');
+    expect(parseGpx('<gpx></gpx>', 'x'), isNull);
+  });
 }

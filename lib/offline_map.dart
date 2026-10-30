@@ -252,7 +252,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
 
   const empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
   final sources = <String, dynamic>{
-    for (final id in ['me', 'track', 'wpts', 'water', 'target']) id: {'type': 'geojson', 'data': empty},
+    for (final id in ['me', 'track', 'wpts', 'water', 'target', 'route']) id: {'type': 'geojson', 'data': empty},
   };
   final layers = <Map<String, dynamic>>[
     for (final l in base)
@@ -574,6 +574,14 @@ const _meLayers = [
     },
     'paint': {'text-color': '#ffffff'},
   },
+  // 따라가는 GPX 경로: 굵은 보라색 (내 이동 기록보다 아래)
+  {
+    'id': 'route-line',
+    'type': 'line',
+    'source': 'route',
+    'layout': {'line-cap': 'round', 'line-join': 'round'},
+    'paint': {'line-color': '#7048e8', 'line-width': 6, 'line-opacity': 0.75},
+  },
   {
     'id': 'track',
     'type': 'line',
@@ -728,6 +736,7 @@ class MapControl {
     _ctl?.setGeoJsonSource('wpts', _wpts);
     _ctl?.setGeoJsonSource('water', _water);
     _drawTarget();
+    _ctl?.setGeoJsonSource('route', _route);
     for (final g in layerGroups) {
       if (hidden.value.contains(g.id)) _applyGroup(g, false);
     }
@@ -806,6 +815,28 @@ class MapControl {
   void toggleTilt() {
     tilted.value = !tilted.value;
     _ctl?.animateCamera(CameraUpdate.tiltTo(tilted.value ? 60 : 0));
+  }
+
+  Map<String, dynamic> _route = _emptyFc;
+
+  /// 따라가는 GPX 경로 (null이면 지움)
+  void setRoute(List<TrackPoint>? pts) {
+    _route = pts == null || pts.length < 2
+        ? _emptyFc
+        : {
+            'type': 'FeatureCollection',
+            'features': [
+              {
+                'type': 'Feature',
+                'geometry': {
+                  'type': 'LineString',
+                  'coordinates': [for (final p in pts) [p.lon, p.lat]],
+                },
+                'properties': <String, dynamic>{},
+              }
+            ],
+          };
+    if (_ready) _ctl?.setGeoJsonSource('route', _route);
   }
 
   void setTrack(List<TrackPoint> pts) {
@@ -1214,14 +1245,6 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
                 else
                   for (final parts in bundleCatalog(catalog)) _bundle(parts, installed, progress),
                 const SizedBox(height: 12),
-                Card(
-                  child: ListTile(
-                    leading: const Icon(Icons.crop_free),
-                    title: const Text('영역 직접 지정'),
-                    subtitle: const Text('지도에서 원하는 범위만 골라 받기 (준비 중)'),
-                    enabled: false,
-                  ),
-                ),
                 const Padding(
                   padding: EdgeInsets.all(8),
                   child: Text(

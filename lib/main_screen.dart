@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
@@ -37,10 +39,12 @@ class MainScreen extends StatefulWidget {
   final VoidCallback onRetrySource, onDismissAlert;
   final TerrainAnalysis analysis;
   final Guide guide;
+  final RouteFollow route;
 
   const MainScreen({
     required this.analysis,
     required this.guide,
+    required this.route,
     super.key,
     required this.snap,
     required this.sensors,
@@ -77,12 +81,14 @@ class _MainScreenState extends State<MainScreen> {
     super.initState();
     widget.map.onLongPress = _onLongPress;
     widget.guide.info.addListener(_checkArrival);
+    widget.route.info.addListener(_checkRoute);
   }
 
   @override
   void dispose() {
     widget.map.onLongPress = null;
     widget.guide.info.removeListener(_checkArrival);
+    widget.route.info.removeListener(_checkRoute);
     super.dispose();
   }
 
@@ -96,6 +102,35 @@ class _MainScreenState extends State<MainScreen> {
       duration: const Duration(seconds: 10),
       action: SnackBarAction(label: '안내 종료', onPressed: widget.guide.stop),
     ));
+  }
+
+  bool _wasOff = false, _routeDone = false;
+
+  /// 경로에서 벗어나는 순간 / 경로 끝에 닿는 순간 진동과 알림 (한 번씩)
+  void _checkRoute() {
+    final i = widget.route.info.value;
+    if (i == null) {
+      _wasOff = _routeDone = false;
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    if (i.offRoute && !_wasOff) {
+      HapticFeedback.heavyImpact();
+      messenger.showSnackBar(SnackBar(
+        backgroundColor: Colors.red.shade800,
+        content: Text('경로 이탈 ${distanceLabel(i.off)} — 경로는 ${directionLabel(i.toRoute)} 쪽'),
+      ));
+    }
+    _wasOff = i.offRoute;
+    if (i.finished && !_routeDone) {
+      _routeDone = true;
+      HapticFeedback.heavyImpact();
+      messenger.showSnackBar(SnackBar(
+        content: const Text('경로 끝에 도착했습니다'),
+        duration: const Duration(seconds: 10),
+        action: SnackBarAction(label: '따라가기 종료', onPressed: widget.route.stop),
+      ));
+    }
   }
 
   void _guideTo(NavTarget t) {
@@ -331,6 +366,7 @@ class _MainScreenState extends State<MainScreen> {
           log: widget.log,
           waypoints: widget.waypoints,
           onGuide: _guideTo,
+          route: widget.route,
           map: widget.map,
           source: widget.source,
           onSource: widget.onSource,
@@ -487,6 +523,7 @@ class _MainScreenState extends State<MainScreen> {
                 scroll: scroll,
                 guide: widget.guide,
                 analysis: widget.analysis,
+                route: widget.route,
                 snap: widget.snap,
                 sensors: widget.sensors,
                 weather: widget.weather,
@@ -678,6 +715,7 @@ class _MapChip extends StatelessWidget {
 class _InfoPanel extends StatelessWidget {
   final ScrollController scroll;
   final Guide guide;
+  final RouteFollow route;
   final TerrainAnalysis analysis;
   final ValueListenable<GnssSnapshot> snap;
   final ValueListenable<List<SensorSample>> sensors;
@@ -686,6 +724,7 @@ class _InfoPanel extends StatelessWidget {
   const _InfoPanel({
     required this.scroll,
     required this.guide,
+    required this.route,
     required this.analysis,
     required this.snap,
     required this.sensors,
@@ -708,6 +747,7 @@ class _InfoPanel extends StatelessWidget {
             decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
           ),
         ),
+        _RouteCard(route: route),
         _GuideCard(guide: guide, analysis: analysis),
         Row(children: [
           Expanded(
@@ -906,6 +946,7 @@ class _BottomBar extends StatelessWidget {
 // ---------------- 도구 ----------------
 
 class ToolsPage extends StatelessWidget {
+  final RouteFollow route;
   final ValueListenable<GnssSnapshot> snap;
   final ValueListenable<List<SensorSample>> sensors;
   final ValueListenable<StormStatus> weather;
@@ -917,6 +958,7 @@ class ToolsPage extends StatelessWidget {
   final DataSource source;
   final void Function(DataSource) onSource;
   const ToolsPage({
+    required this.route,
     required this.onGuide,
     super.key,
     required this.snap,
@@ -944,7 +986,8 @@ class ToolsPage extends StatelessWidget {
           () => open(SensorPage(data: sensors, weather: weather, qnhHistory: qnhHistory), '센서 그래프')),
       tile(Icons.place_outlined, '저장한 지점', '거리·방위 보기, 지도에서 찾기',
           () => open(WaypointsPage(waypoints: waypoints, snap: snap, map: map, onGuide: onGuide), '저장한 지점')),
-      tile(Icons.route, '이동 기록 파일', '저장된 GPX 파일', () => open(const TracksPage(), '이동 기록 파일')),
+      tile(Icons.route, '경로 따라가기', 'GPX 불러오기, 내 이동 기록, 왔던 길로 돌아가기',
+          () => open(RoutesPage(route: route), '경로 따라가기')),
       tile(Icons.terminal, 'NMEA 로그', '수신기 원시 문장', () => open(LogPage(log: log), 'NMEA 로그')),
       const Divider(),
       tile(Icons.settings, '설정', '위치 출처 (폰 GPS / 외부 장치)',
@@ -1007,15 +1050,17 @@ class WaypointsPage extends StatelessWidget {
       );
 }
 
-class TracksPage extends StatefulWidget {
-  const TracksPage({super.key});
+/// 경로 따라가기: 불러온 GPX 경로와 내 이동 기록 목록. 따라가기 / 거꾸로(왔던 길로 돌아가기)
+class RoutesPage extends StatefulWidget {
+  final RouteFollow route;
+  const RoutesPage({super.key, required this.route});
 
   @override
-  State<TracksPage> createState() => _TracksPageState();
+  State<RoutesPage> createState() => _RoutesPageState();
 }
 
-class _TracksPageState extends State<TracksPage> {
-  List<File>? _files;
+class _RoutesPageState extends State<RoutesPage> {
+  List<File>? _routes, _tracks;
 
   @override
   void initState() {
@@ -1024,24 +1069,69 @@ class _TracksPageState extends State<TracksPage> {
   }
 
   Future<void> _load() async {
-    final d = Directory('${(await getApplicationDocumentsDirectory()).path}/tracks');
-    final files = d.existsSync() ? d.listSync().whereType<File>().where((f) => f.path.endsWith('.gpx')).toList() : <File>[];
-    files.sort((a, b) => b.path.compareTo(a.path));
-    if (mounted) setState(() => _files = files);
+    List<File> gpx(Directory d) => d.existsSync()
+        ? (d.listSync().whereType<File>().where((f) => f.path.toLowerCase().endsWith('.gpx')).toList()
+          ..sort((a, b) => b.path.compareTo(a.path)))
+        : <File>[];
+    final routes = gpx(await routesDir());
+    final tracks = gpx(Directory('${(await getApplicationDocumentsDirectory()).path}/tracks'));
+    if (mounted) {
+      setState(() {
+        _routes = routes;
+        _tracks = tracks;
+      });
+    }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final files = _files;
-    if (files == null) return const Center(child: CircularProgressIndicator());
-    if (files.isEmpty) return const Center(child: Text('아래 [이동 시작]으로 기록하면 여기에 저장됩니다'));
-    return ListView(children: [
-      for (final f in files)
-        ListTile(
-          leading: const Icon(Icons.route),
-          title: Text(f.path.split(Platform.pathSeparator).last.split('/').last),
-          subtitle: Text('${(f.lengthSync() / 1024).toStringAsFixed(1)} KB'),
-          trailing: IconButton(
+  static String _baseName(File f) =>
+      f.path.split('/').last.split(Platform.pathSeparator).last.replaceAll(RegExp(r'\.gpx$', caseSensitive: false), '');
+
+  /// 휴대폰에서 GPX 파일을 골라 앱 폴더로 복사 (저장소 권한 없이 시스템 파일 선택기 사용)
+  Future<void> _import() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final files = await FilePicker.pickFiles(type: FileType.any);
+    if (files.isEmpty) return;
+    final f = files.first;
+    final text = utf8.decode(await f.readAsBytes(), allowMalformed: true);
+    final name = f.name.replaceAll(RegExp(r'\.gpx$', caseSensitive: false), '');
+    final r = parseGpx(text, name);
+    if (r == null) {
+      messenger.showSnackBar(const SnackBar(content: Text('GPX 경로를 찾지 못했습니다 (trkpt/rtept 점이 없음)')));
+      return;
+    }
+    final safe = name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+    await File('${(await routesDir()).path}/$safe.gpx').writeAsString(text);
+    messenger.showSnackBar(SnackBar(content: Text('"${r.name}" 불러옴: ${distanceLabel(r.total)}, 점 ${r.pts.length}개')));
+    _load();
+  }
+
+  Future<void> _follow(File f, {bool reverse = false}) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final nav = Navigator.of(context);
+    final r = parseGpx(await f.readAsString(), _baseName(f));
+    if (r == null) {
+      messenger.showSnackBar(const SnackBar(content: Text('경로 점이 2개 미만입니다')));
+      return;
+    }
+    final use = reverse ? r.reversed() : r;
+    await widget.route.start(use);
+    messenger.showSnackBar(SnackBar(content: Text('"${use.name}" 따라가기 시작 (${distanceLabel(use.total)})')));
+    nav.popUntil((p) => p.isFirst);
+  }
+
+  Widget _tile(File f, {required bool imported}) => ListTile(
+        leading: Icon(imported ? Icons.route : Icons.timeline),
+        title: Text(_baseName(f)),
+        subtitle: Text('${(f.lengthSync() / 1024).toStringAsFixed(1)} KB'),
+        onTap: () => _follow(f),
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(icon: const Icon(Icons.play_arrow), tooltip: '따라가기', onPressed: () => _follow(f)),
+          IconButton(
+            icon: const Icon(Icons.u_turn_left),
+            tooltip: '거꾸로 (왔던 길로 돌아가기)',
+            onPressed: () => _follow(f, reverse: true),
+          ),
+          IconButton(
             icon: const Icon(Icons.delete_outline),
             tooltip: '삭제',
             onPressed: () {
@@ -1049,7 +1139,52 @@ class _TracksPageState extends State<TracksPage> {
               _load();
             },
           ),
+        ]),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final routes = _routes, tracks = _tracks;
+    const head = TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white70);
+    return Stack(children: [
+      if (routes == null || tracks == null)
+        const Center(child: CircularProgressIndicator())
+      else
+        ListView(padding: const EdgeInsets.only(bottom: 90), children: [
+          ValueListenableBuilder<GpxRoute?>(
+            valueListenable: widget.route.route,
+            builder: (_, r, __) => r == null
+                ? const SizedBox.shrink()
+                : Card(
+                    margin: const EdgeInsets.all(12),
+                    child: ListTile(
+                      leading: const Icon(Icons.directions_walk, color: Color(0xFF9775FA)),
+                      title: Text('따라가는 중: ${r.name}'),
+                      subtitle: Text(distanceLabel(r.total)),
+                      trailing: TextButton(onPressed: widget.route.stop, child: const Text('종료')),
+                    ),
+                  ),
+          ),
+          const Padding(padding: EdgeInsets.fromLTRB(16, 12, 16, 4), child: Text('불러온 경로', style: head)),
+          if (routes.isEmpty)
+            const ListTile(
+              title: Text('아래 [GPX 불러오기]로 등산로 파일을 넣을 수 있습니다'),
+              subtitle: Text('등산 앱·산림청 등에서 받은 .gpx 파일'),
+            ),
+          for (final f in routes) _tile(f, imported: true),
+          const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('내 이동 기록', style: head)),
+          if (tracks.isEmpty) const ListTile(title: Text('아래 [이동 시작]으로 기록하면 여기에 저장됩니다')),
+          for (final f in tracks) _tile(f, imported: false),
+        ]),
+      Positioned(
+        right: 16,
+        bottom: 16,
+        child: FloatingActionButton.extended(
+          onPressed: _import,
+          icon: const Icon(Icons.file_open_outlined),
+          label: const Text('GPX 불러오기'),
         ),
+      ),
     ]);
   }
 }
@@ -1173,6 +1308,82 @@ class _GuideCard extends StatelessWidget {
                         tooltip: '안내 종료',
                         onPressed: guide.stop,
                       ),
+                    ]),
+                  );
+                },
+              ),
+      );
+}
+
+// ---------------- GPX 경로 따라가기 카드 (아래 패널 맨 위) ----------------
+
+class _RouteCard extends StatelessWidget {
+  final RouteFollow route;
+  const _RouteCard({required this.route});
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<GpxRoute?>(
+        valueListenable: route.route,
+        builder: (_, r, __) => r == null
+            ? const SizedBox.shrink()
+            : ValueListenableBuilder<RouteInfo?>(
+                valueListenable: route.info,
+                builder: (_, i, __) {
+                  const sub = TextStyle(fontSize: 12, color: Colors.white70);
+                  final off = i?.offRoute == true;
+                  final pct = i == null || r.total == 0 ? 0 : (i.done / r.total * 100).round();
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.fromLTRB(12, 10, 4, 10),
+                    decoration: BoxDecoration(
+                      color: off ? const Color(0xFF3B1E1E) : const Color(0xFF241E36),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: off ? Colors.redAccent : const Color(0xFF9775FA)),
+                    ),
+                    child: Row(children: [
+                      Icon(off ? Icons.wrong_location_outlined : Icons.directions_walk,
+                          size: 34, color: off ? Colors.redAccent : const Color(0xFF9775FA)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(r.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                          Text(
+                            i == null
+                                ? '현재 위치를 기다리는 중'
+                                : i.finished
+                                    ? '경로 끝 도착'
+                                    : off
+                                        ? '경로 이탈 ${distanceLabel(i.off)}'
+                                        : '남은 ${distanceLabel(i.left)}  ·  $pct%',
+                            style: TextStyle(
+                                fontSize: 19, fontWeight: FontWeight.w700, color: off ? Colors.redAccent : null),
+                          ),
+                          if (i != null && !i.finished)
+                            Text(
+                              off
+                                  ? '경로로 돌아가기: ${directionLabel(i.toRoute)} 방향'
+                                  : [
+                                      '진행 방향 ${directionLabel(i.ahead)}',
+                                      '걸어서 약 ${durationLabel(i.walk)}',
+                                      if (i.climbLeft >= 10) '남은 오르막 ${i.climbLeft.round()} m',
+                                    ].join('  ·  '),
+                              style: sub,
+                            ),
+                          if (i != null && r.total > 0)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 6, right: 8),
+                              child: LinearProgressIndicator(
+                                value: (i.done / r.total).clamp(0.0, 1.0),
+                                color: const Color(0xFF9775FA),
+                                backgroundColor: Colors.white12,
+                              ),
+                            ),
+                        ]),
+                      ),
+                      IconButton(icon: const Icon(Icons.close), tooltip: '따라가기 종료', onPressed: route.stop),
                     ]),
                   );
                 },

@@ -494,6 +494,7 @@ class _HomePageState extends State<HomePage> {
   final waypoints = WaypointStore();
   final mapControl = MapControl();
   final guide = Guide(); // 목표 지점 안내
+  final route = RouteFollow(); // GPX 경로 따라가기
   final heading = ValueNotifier<double?>(null); // 폰이 향한 방위 (진북 기준)
   StreamSubscription<dynamic>? _headingSub;
   late final analysis = TerrainAnalysis(snap: parser.notifier, heading: heading);
@@ -516,6 +517,11 @@ class _HomePageState extends State<HomePage> {
       _updateGuide();
     });
     guide.load();
+    route.route.addListener(() {
+      mapControl.setRoute(route.route.value?.pts);
+      _updateGuide();
+    });
+    route.load();
     if (isAndroid) analysis.start(); // 고도 데이터·지도 파일은 안드로이드에서만 받음
     if (isAndroid) {
       _headingSub = const EventChannel('gnss_tool/heading').receiveBroadcastStream().listen((d) {
@@ -538,9 +544,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _updateGuide() {
-    if (guide.target.value == null) return;
     final s = parser.notifier.value;
     final ok = s.fixQ > 0;
+    if (route.route.value != null) route.update(ok ? s.lat : null, ok ? s.lon : null, s.hAcc);
+    if (guide.target.value == null) return;
     guide.update(ok ? s.lat : null, ok ? s.lon : null, s.hAcc, heading.value, analysis.elevationAt);
   }
 
@@ -732,6 +739,7 @@ class _HomePageState extends State<HomePage> {
       sourceLabel: sourceLabels[source]!,
       map: mapControl,
       guide: guide,
+      route: route,
       track: track,
       waypoints: waypoints,
       source: source,
