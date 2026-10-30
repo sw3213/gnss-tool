@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'advice.dart';
 import 'analysis.dart';
 import 'dop.dart';
 import 'main_screen.dart';
@@ -495,6 +496,13 @@ class _HomePageState extends State<HomePage> {
   final mapControl = MapControl();
   final guide = Guide(); // 목표 지점 안내
   final route = RouteFollow(); // GPX 경로 따라가기
+  late final advice = AdviceWatch(
+    sensors: sensors,
+    weather: weather,
+    snap: parser.notifier,
+    sun: analysis.sunToday,
+    walkLeft: () => route.info.value?.walk ?? guide.info.value?.walk,
+  );
   final heading = ValueNotifier<double?>(null); // 폰이 향한 방위 (진북 기준)
   StreamSubscription<dynamic>? _headingSub;
   late final analysis = TerrainAnalysis(snap: parser.notifier, heading: heading);
@@ -522,6 +530,7 @@ class _HomePageState extends State<HomePage> {
       _updateGuide();
     });
     route.load();
+    advice.start();
     if (isAndroid) analysis.start(); // 고도 데이터·지도 파일은 안드로이드에서만 받음
     if (isAndroid) {
       _headingSub = const EventChannel('gnss_tool/heading').receiveBroadcastStream().listen((d) {
@@ -609,6 +618,7 @@ class _HomePageState extends State<HomePage> {
     _headingSub?.cancel();
     parser.notifier.removeListener(_onPosition);
     if (isAndroid) analysis.dispose();
+    advice.dispose();
     super.dispose();
   }
 
@@ -740,6 +750,7 @@ class _HomePageState extends State<HomePage> {
       map: mapControl,
       guide: guide,
       route: route,
+      advice: advice.advice,
       track: track,
       waypoints: waypoints,
       source: source,

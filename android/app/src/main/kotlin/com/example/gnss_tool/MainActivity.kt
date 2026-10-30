@@ -6,6 +6,8 @@ import android.app.ActivityManager
 import android.app.ApplicationExitInfo
 import android.app.DownloadManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -16,6 +18,7 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.location.OnNmeaMessageListener
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -110,6 +113,19 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "lastCrash" -> result.success(runCatching { lastCrash() }.getOrNull())
                 "lastExitWasCrash" -> result.success(lastExitWasCrash)
+                // 배터리 잔량·온도 (조언: 배터리 부족, 폰 과열). 권한 없이 시스템 방송의 마지막 값을 읽음
+                "battery" -> {
+                    val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                    if (i == null) result.success(null) else {
+                        val level = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                        val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+                        result.success(mapOf(
+                            "percent" to if (level < 0) null else level * 100.0 / scale,
+                            "tempC" to i.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1000) / 10.0,
+                            "charging" to (i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0),
+                        ))
+                    }
+                }
                 else -> result.notImplemented()
             }
         }

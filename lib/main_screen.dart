@@ -9,6 +9,7 @@ import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:maplibre_gl/maplibre_gl.dart' show CameraPosition;
 import 'package:path_provider/path_provider.dart';
 
+import 'advice.dart';
 import 'analysis.dart';
 import 'main.dart';
 import 'nav.dart';
@@ -40,8 +41,10 @@ class MainScreen extends StatefulWidget {
   final TerrainAnalysis analysis;
   final Guide guide;
   final RouteFollow route;
+  final ValueListenable<List<Advice>> advice;
 
   const MainScreen({
+    required this.advice,
     required this.analysis,
     required this.guide,
     required this.route,
@@ -524,6 +527,7 @@ class _MainScreenState extends State<MainScreen> {
                 guide: widget.guide,
                 analysis: widget.analysis,
                 route: widget.route,
+                advice: widget.advice,
                 snap: widget.snap,
                 sensors: widget.sensors,
                 weather: widget.weather,
@@ -714,6 +718,7 @@ class _MapChip extends StatelessWidget {
 
 class _InfoPanel extends StatelessWidget {
   final ScrollController scroll;
+  final ValueListenable<List<Advice>> advice;
   final Guide guide;
   final RouteFollow route;
   final TerrainAnalysis analysis;
@@ -723,6 +728,7 @@ class _InfoPanel extends StatelessWidget {
   final TrackRecorder track;
   const _InfoPanel({
     required this.scroll,
+    required this.advice,
     required this.guide,
     required this.route,
     required this.analysis,
@@ -749,6 +755,7 @@ class _InfoPanel extends StatelessWidget {
         ),
         _RouteCard(route: route),
         _GuideCard(guide: guide, analysis: analysis),
+        _AdviceList(advice: advice),
         Row(children: [
           Expanded(
             child: ValueListenableBuilder<GnssSnapshot>(
@@ -1387,6 +1394,60 @@ class _RouteCard extends StatelessWidget {
                     ]),
                   );
                 },
+              ),
+      );
+}
+
+// ---------------- 조언 (아래 패널, 안내 카드 아래) ----------------
+
+class _AdviceList extends StatelessWidget {
+  final ValueListenable<List<Advice>> advice;
+  const _AdviceList({required this.advice});
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<List<Advice>>(
+        valueListenable: advice,
+        builder: (_, list, __) => list.isEmpty
+            ? const SizedBox.shrink()
+            : Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Column(children: [
+                  for (final a in list)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                      decoration: BoxDecoration(
+                        color: switch (a.level) {
+                          AdviceLevel.danger => const Color(0xFF4A1C1C),
+                          AdviceLevel.warn => const Color(0xFF45361A),
+                          AdviceLevel.info => const Color(0xFF1E2A38),
+                        },
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Icon(
+                          switch (a.level) {
+                            AdviceLevel.danger => Icons.warning_rounded,
+                            AdviceLevel.warn => Icons.error_outline,
+                            AdviceLevel.info => Icons.info_outline,
+                          },
+                          size: 20,
+                          color: switch (a.level) {
+                            AdviceLevel.danger => Colors.redAccent,
+                            AdviceLevel.warn => Colors.amberAccent,
+                            AdviceLevel.info => Colors.lightBlueAccent,
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(a.title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                            Text(a.detail, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                          ]),
+                        ),
+                      ]),
+                    ),
+                ]),
               ),
       );
 }
