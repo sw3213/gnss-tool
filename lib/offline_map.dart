@@ -828,7 +828,8 @@ class _MapPageState extends State<MapPage> {
 
   Future<void> _rebuildStyle() async {
     final packs = store.installed.value;
-    final ids = [for (final p in packs) p.id];
+    // 지도 업데이트로 파일만 바뀌어도(예전 파일은 지워짐) 새 파일로 다시 그려야 하므로 경로까지 비교
+    final ids = [for (final p in packs) '${p.id}@${store.fileOf(p.id)}'];
     if (listEquals(ids, _styleIds) && _style != null) return;
     final style = await buildStyle(packs);
     if (!mounted) return;
