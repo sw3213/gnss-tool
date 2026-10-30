@@ -1,0 +1,68 @@
+name: Build routing graph
+
+# 길찾기용 도로·등산로 연결망(kr-routes.grt)을 OpenStreetMap 한국 데이터(Geofabrik)에서 만들어 Release "maps"에 올림.
+# 연결마다 오르막·내리막은 분석용 고도 격자(kr-dem.gdem, dem.yml)로 미리 계산. 앱은 kind="routes"로 길을 찾음.
+# 형식·길 종류는 lib/routing.dart, 만드는 코드는 tool/build_routes.dart
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 1 * *' # 매월 1일 (기본 지도 갱신 뒤)
+
+permissions:
+  contents: write
+
+jobs:
+  routes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install osmium
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q osmium-tool jq
+          osmium --version
+
+      - name: Download OpenStreetMap (South Korea) and elevation grid
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -sfL -o kr.osm.pbf https://download.geofabrik.de/asia/south-korea-latest.osm.pbf
+          gh release download maps -p kr-dem.gdem
+          ls -la kr.osm.pbf kr-dem.gdem
+
+      - name: Ways -> GeoJSON lines
+        run: |
+          osmium tags-filter -O -o hw.osm.pbf kr.osm.pbf w/highway
+          osmium export -O -f geojsonseq --geometry-types=linestring -o ways.geojsons hw.osm.pbf
+          ls -la ways.geojsons
+
+      - name: Build graph
+        run: |
+          flutter pub get
+          dart run tool/build_routes.dart ways.geojsons kr-routes.grt kr-dem.gdem
+          ls -la kr-routes.grt
+
+      - name: Publish to release "maps"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          size=$(stat -c %s kr-routes.grt)
+          date=$(date -u +%Y-%m-%d)
+          gh release download maps -p catalog.json -O old.json 2>/dev/null || echo '[]' > old.json
+          jq --arg url "https://github.com/$REPO/releases/download/maps/kr-routes.grt" \
+             --arg date "$date" --argjson size "$size" \
+             '[.[] | select(.kind != "routes")] + [{
+                id: "kr-routes", name: "대한민국 길찾기", kind: "routes",
+                bbox: [124.5, 33.0, 132.0, 38.7], url: $url, date: $date, size: $size, maxzoom: 0
+              }]' old.json > catalog.json
+          cat catalog.json
+          gh release upload maps kr-routes.grt catalog.json --clobber
