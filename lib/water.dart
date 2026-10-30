@@ -6,7 +6,7 @@ import 'dart:typed_data';
 import 'nav.dart';
 
 // ============================================================
-// 가장 가까운 수원지: 내려받은 지도(.pmtiles)를 직접 읽어 계곡·하천·샘·호수·식수대를 찾음 (바다 제외)
+// 가장 가까운 수원지: 내려받은 지도(.pmtiles)를 직접 읽어 계곡·하천·샘·식수대를 찾음 (바다·호수·소류지 제외)
 // PMTiles v3 + Mapbox Vector Tile을 필요한 만큼만 해석하는 작은 리더
 // ============================================================
 
@@ -299,7 +299,7 @@ MvtFeature _feature(_Pb f, List<String> keys, List<Object?> values) {
 // ---------------- 가장 가까운 수원지 ----------------
 
 class WaterSource {
-  final String label; // 샘, 계곡, 하천, 호수, 식수대 …
+  final String label; // 샘, 계곡, 하천, 식수대 …
   final String? name;
   final double lat, lon, distanceM;
   const WaterSource(this.label, this.name, this.lat, this.lon, this.distanceM);
@@ -308,8 +308,10 @@ class WaterSource {
 /// 이름으로 걸러낼 고인 물·인공 수로 (OSM에서 호수나 일반 물로 잘못 분류된 경우까지 잡기 위해)
 const _stagnantNames = ['소류지', '저수지', '유수지', '저류지', '연못', '양어장', '배수', '농수로', '수로', '침사지', '못'];
 
-/// 생존용 수원지로 쓸 만한 물만 고름. 흐르는 물(계곡·개울·하천), 샘, 식수대, 자연 호수.
-/// 고인 물(소류지·저수지·연못)과 농수로·배수로·운하는 정체·오염 위험이 커서 제외. 바다·수영장·분수도 제외
+/// 생존용 수원지로 쓸 만한 물만 고름. 흐르는 물(계곡·개울·하천), 샘, 식수대.
+/// 고인 물(호수·소류지·저수지·연못)과 농수로·배수로·운하는 정체·오염 위험이 커서 제외. 바다·수영장·분수도 제외.
+/// 한국의 "호수"(kind_detail=lake)는 거의 다 저수지·소류지이고, z14 타일의 물 면에는 이름이 빠져 있어
+/// 이름으로 걸러낼 수도 없음 (예: 의남송소류지가 이름 없는 lake로 들어옴) -> 호수는 통째로 제외
 String? waterLabel(String layer, Map<String, Object?> p) {
   final kind = p['kind'] as String?, detail = p['kind_detail'] as String?;
   final name = (p['name:ko'] ?? p['name']) as String?;
@@ -328,8 +330,7 @@ String? waterLabel(String layer, Map<String, Object?> p) {
   return switch (kind == 'water' ? detail : kind) {
     'stream' => '계곡·개울',
     'river' || 'riverbank' => '하천',
-    'lake' => '호수',
-    _ => null, // reservoir, basin, pond, ditch, drain, canal, 분류 없음
+    _ => null, // lake, reservoir, basin, pond, ditch, drain, canal, 분류 없음
   };
 }
 

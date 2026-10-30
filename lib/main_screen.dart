@@ -86,7 +86,7 @@ class _MainScreenState extends State<MainScreen> {
             child: Column(mainAxisSize: MainAxisSize.min, children: [
           const ListTile(
             title: Text('가까운 수원지', style: TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: Text('흐르는 물·샘·식수대·호수만 (소류지·저수지·연못·농수로 제외). 마시기 전 반드시 끓이거나 정수하세요'),
+            subtitle: Text('흐르는 물·샘·식수대만 (호수·소류지·저수지·연못·농수로 제외). 마시기 전 반드시 끓이거나 정수하세요'),
           ),
           for (var i = 0; i < ws.length; i++)
             ListTile(

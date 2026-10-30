@@ -11,11 +11,11 @@ void main() {
     expect(zxyToTileId(2, 0, 0), 5);
   });
 
-  test('survival water: flowing water, springs, lakes only', () {
+  test('survival water: flowing water and springs only', () {
     // 실제 한국 지도에서 본 종류들
     expect(waterLabel('water', {'kind': 'stream'}), '계곡·개울');
     expect(waterLabel('water', {'kind': 'river'}), '하천');
-    expect(waterLabel('water', {'kind': 'water', 'kind_detail': 'lake'}), '호수');
+    expect(waterLabel('water', {'kind': 'water', 'kind_detail': 'lake'}), isNull); // 이름 없는 소류지가 이렇게 들어옴
     expect(waterLabel('water', {'kind': 'water', 'kind_detail': 'river'}), '하천');
     expect(waterLabel('pois', {'kind': 'drinking_water'}), '식수대');
     expect(waterLabel('pois', {'kind': 'spring'}), '샘');
