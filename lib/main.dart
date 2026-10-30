@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'advice.dart';
 import 'analysis.dart';
+import 'ble_source.dart';
 import 'dop.dart';
 import 'main_screen.dart';
 import 'nav.dart';
@@ -469,9 +470,9 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-enum DataSource { sim, phone } // 다음: ESP32(BLE) — 설정에서 고름
+enum DataSource { sim, phone, ble } // ble = 외부 장치 (ESP32 BlackGPS) — 설정에서 고름
 
-const sourceLabels = {DataSource.sim: '시뮬레이션', DataSource.phone: '폰 GPS'};
+const sourceLabels = {DataSource.sim: '시뮬레이션', DataSource.phone: '폰 GPS', DataSource.ble: '외부 장치'};
 
 class _HomePageState extends State<HomePage> {
   final parser = NmeaParser();
@@ -488,6 +489,10 @@ class _HomePageState extends State<HomePage> {
   DataSource source = isAndroid ? DataSource.phone : DataSource.sim;
   GnssSimulator? _sim;
   PhoneGnss? _phone;
+  BleGnss? _ble;
+  bool _bleActive = false; // 외부 장치 위치를 쓰는 중 (아니면 폰 GPS로 대신)
+  DateTime _bleLast = DateTime(0), _bleSensorLast = DateTime(0);
+  Timer? _bleWatch;
   Timer? _sampler;
   double? _pressure, _temp, _humidity; // 출처가 보낸 최신 센서 값
 
@@ -688,33 +693,99 @@ class _HomePageState extends State<HomePage> {
           ..start();
       case DataSource.phone:
         notice.value = '위성 신호를 찾는 중... 실외나 창가에서 더 빨리 잡힙니다.';
-        _phone = PhoneGnss(
-          onLine: _onLine,
-          onSats: (sats) {
-            if (sats.any((s) => s.snr != null) && notice.value != null) notice.value = null;
-            parser.externalSats = sats;
-            parser.publish();
-          },
-          onAccuracy: (h, v) {
-            parser.hAcc = h;
-            parser.vAcc = v;
-          },
-          onPressure: (p) => _pressure = p,
-          onGnssError: (code) => notice.value = switch (code) {
-            'PERMISSION_DENIED' => '정확한 위치 권한이 필요합니다. [다시 시도]를 누르거나 설정 > 애플리케이션에서 허용해 주세요.',
-            'GPS_OFF' => '폰의 위치(GPS)가 꺼져 있습니다. 켠 뒤 [다시 시도]를 눌러 주세요.',
-            _ => 'GPS 오류: $code',
-          },
-          onNoBarometer: () {}, // 기압 null로 남음 -> 센서 탭에 "센서 없음" 표시
-        )..start();
+        _startPhone();
+      case DataSource.ble:
+        // 외부 장치가 위치를 보내기 전까지(그리고 끊기면 다시) 폰 GPS로 대신함
+        notice.value = '외부 장치(BlackGPS)를 찾는 중... 그동안 폰 GPS를 씁니다.';
+        _startPhone();
+        _ble = BleGnss(onLine: _onBleLine, onSensor: _onBleSensor, onState: _onBleState)..start();
+        _bleWatch = Timer.periodic(const Duration(seconds: 2), (_) {
+          if (_bleActive && DateTime.now().difference(_bleLast).inSeconds > 5) _useBle(false);
+        });
     }
+  }
+
+  void _startPhone() {
+    _phone ??= PhoneGnss(
+      onLine: _onLine,
+      onSats: (sats) {
+        if (sats.any((s) => s.snr != null) && source == DataSource.phone && notice.value != null) notice.value = null;
+        parser.externalSats = sats;
+        parser.publish();
+      },
+      onAccuracy: (h, v) {
+        parser.hAcc = h;
+        parser.vAcc = v;
+      },
+      // 외부 장치 기압계가 살아 있으면 그쪽 값을 씀
+      onPressure: (p) {
+        if (DateTime.now().difference(_bleSensorLast).inSeconds > 5) _pressure = p;
+      },
+      onGnssError: (code) => notice.value = switch (code) {
+        'PERMISSION_DENIED' => '정확한 위치 권한이 필요합니다. [다시 시도]를 누르거나 설정 > 애플리케이션에서 허용해 주세요.',
+        'GPS_OFF' => '폰의 위치(GPS)가 꺼져 있습니다. 켠 뒤 [다시 시도]를 눌러 주세요.',
+        _ => 'GPS 오류: $code',
+      },
+      onNoBarometer: () {}, // 기압 null로 남음 -> 센서 탭에 "센서 없음" 표시
+    )..start();
+  }
+
+  /// 외부 장치 위치를 쓸지(true) 폰 GPS로 대신할지(false). 바뀔 때 위성 목록이 섞이지 않게 파서를 비움
+  void _useBle(bool on) {
+    if (_bleActive == on) return;
+    _bleActive = on;
+    parser.reset();
+    if (on) {
+      _phone?.stop();
+      _phone = null;
+      notice.value = null;
+    } else {
+      notice.value = '외부 장치 신호가 끊겨 폰 GPS로 바꿨습니다. 다시 연결되면 자동으로 돌아갑니다.';
+      _startPhone();
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _onBleLine(String line) {
+    _bleLast = DateTime.now();
+    if (!_bleActive) {
+      // 장치가 위치를 잡은 GGA가 오면 그때부터 장치로 전환
+      final f = line.split(',');
+      final fixed = line.contains('GGA') && f.length > 6 && f[6].isNotEmpty && f[6] != '0';
+      if (!fixed) return;
+      _useBle(true);
+    }
+    _onLine(line);
+  }
+
+  void _onBleSensor(double? p, double? t, double? h, double? battery) {
+    _bleSensorLast = DateTime.now();
+    if (p != null) _pressure = p;
+    _temp = t;
+    _humidity = h;
+  }
+
+  void _onBleState(BleState st, String? msg) {
+    if (_bleActive && st == BleState.connected) return;
+    notice.value = switch (st) {
+      BleState.off => msg ?? '블루투스가 꺼져 있습니다. 켜면 외부 장치에 연결합니다 (그동안 폰 GPS).',
+      BleState.searching => msg ?? '외부 장치(BlackGPS)를 찾는 중... 그동안 폰 GPS를 씁니다.',
+      BleState.connecting => '외부 장치 "${msg ?? deviceName}"에 연결하는 중...',
+      BleState.connected => '외부 장치 연결됨 — 장치가 위성을 잡으면 자동으로 바꿉니다 (그동안 폰 GPS).',
+    };
   }
 
   void _stop() {
     _sim?.stop();
     _phone?.stop();
+    _ble?.stop();
+    _bleWatch?.cancel();
     _sim = null;
     _phone = null;
+    _ble = null;
+    _bleWatch = null;
+    _bleActive = false;
+    _bleSensorLast = DateTime(0);
     _pressure = _temp = _humidity = null;
   }
 
@@ -746,7 +817,7 @@ class _HomePageState extends State<HomePage> {
       notice: notice,
       alert: alert,
       heading: heading,
-      sourceLabel: sourceLabels[source]!,
+      sourceLabel: source == DataSource.ble && !_bleActive ? '폰 GPS (외부 장치 대기)' : sourceLabels[source]!,
       map: mapControl,
       guide: guide,
       route: route,

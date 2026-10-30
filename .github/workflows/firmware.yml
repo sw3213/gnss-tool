@@ -1,0 +1,35 @@
+name: Build firmware
+
+# ESP32-S3 외부 장치 펌웨어(firmware/black_gps)가 컴파일되는지 확인하고, 올릴 수 있는 .bin을 남김
+
+on:
+  push:
+    paths: ['firmware/**', '.github/workflows/firmware.yml']
+  workflow_dispatch:
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli, ESP32 core, libraries
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/bin sh
+          export PATH=$HOME/bin:$PATH
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install "NimBLE-Arduino" "Adafruit AHTX0" "Adafruit BMP280 Library"
+
+      - name: Compile
+        run: |
+          export PATH=$HOME/bin:$PATH
+          arduino-cli compile --fqbn esp32:esp32:esp32s3 --output-dir out firmware/black_gps
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: black_gps-firmware
+          path: out/*.bin

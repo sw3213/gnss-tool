@@ -12,6 +12,12 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove"/>
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" tools:node="remove"/>
+    <!-- 데이터 출처 "외부 장치": ESP32(BlackGPS)와 블루투스(BLE)로 연결. 위치 추정용이 아니라 neverForLocation -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
     <!-- 네트워크 상태는 MapLibre가 씀 (ConnectivityReceiver). 빼면 지도를 여는 순간 SecurityException으로 종료됨 -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <application

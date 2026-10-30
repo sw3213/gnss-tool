@@ -1230,11 +1230,11 @@ class _SettingsPageState extends State<SettingsPage> {
             title: Text('폰 내장 GPS'),
             subtitle: Text('폰의 GPS와 기압계 사용'),
           ),
-          ListTile(
-            enabled: false,
-            leading: Icon(Icons.radio_button_unchecked),
+          RadioListTile<DataSource>(
+            value: DataSource.ble,
             title: Text('외부 GPS 장치 (ESP32 · LC29H)'),
-            subtitle: Text('준비 중 — 장치가 완성되면 BLE로 연결'),
+            subtitle: Text('블루투스로 "BlackGPS" 장치에 연결 — 듀얼밴드 GPS, 기압·온도·습도.\n'
+                '장치가 꺼지거나 끊기면 자동으로 폰 GPS 사용'),
           ),
           RadioListTile<DataSource>(
             value: DataSource.sim,
