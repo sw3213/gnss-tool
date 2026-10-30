@@ -106,6 +106,22 @@ void main() {
     g.close();
   });
 
+  test('road pieces that only join each other are merged into one connection', () {
+    final g = build((b) {
+      // 같은 길이 세 조각으로 나뉨 + 가운데에서 다른 종류 길이 이어짐
+      b.addWay(WayClass.minor, line([(37.0, 127.0), (37.0, 127.002)]));
+      b.addWay(WayClass.minor, line([(37.0, 127.002), (37.0005, 127.004), (37.0, 127.006)]));
+      b.addWay(WayClass.path, line([(37.0, 127.006), (37.0, 127.01)]));
+      b.addWay(WayClass.path, line([(37.0, 127.01), (37.003, 127.01)]));
+    });
+    expect(g.nodes, 3); // 127.0 / 127.006 (종류가 바뀜) / 37.003 끝
+    final r = findRoute(g, 37.0, 127.0, 37.003, 127.01);
+    expect(r.pts.any((p) => (p.$1 - 37.0005).abs() < 1e-6), isTrue);
+    expect(r.pts.any((p) => (p.$2 - 127.002).abs() < 1e-6 && p.$1 == 37.0), isTrue); // 합친 이음매 점도 모양에 남음
+    expect(r.byClass[WayClass.minor], closeTo(550, 3)); // 178 m + 굽은 곳 186 m × 2
+    g.close();
+  });
+
   test('a loop road is split so both halves can be used', () {
     final g = build((b) {
       b.addWay(WayClass.minor, line([(37.0, 127.0), (37.0, 127.01)]));

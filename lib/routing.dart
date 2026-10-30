@@ -14,23 +14,25 @@ import 'dem.dart';
 // Flutter 없이도 쓰도록 dart: 라이브러리만 씀
 //
 // 파일 형식 (리틀엔디언)
-//   헤더 48바이트: b'GRTE', u16 버전(1), u16 0, f64 서쪽 경도, f64 남쪽 위도, f64 칸 크기(도),
+//   헤더 48바이트: b'GRTE', u16 버전(2), u16 0, f64 서쪽 경도, f64 남쪽 위도, f64 칸 크기(도),
 //                  u32 가로 칸 수, u32 세로 칸 수, u32 전체 갈림길 수, u32 0
 //   u32 칸마다 첫 갈림길 번호 (칸 수 + 1)개: 칸 c의 갈림길 = [first[c], first[c+1])
 //   u64 칸마다 자료 위치 (칸 수 + 1)개: 칸 c 자료 = [off[c], off[c+1]), 비어 있으면 길이 0
 //   칸 자료 (zlib 압축):
-//     u32 갈림길 수 n, 연결 수 m, 모양 수 g, 모양 점 수 q
-//     i32 위도[n], 경도[n] (백만분의 1도)
+//     u32 갈림길 수 n, 연결 수 m, 모양 수 g, 모양 점 바이트 수 q
+//     u16 위도[n], 경도[n] (칸 남서쪽 모서리에서 백만분의 1도 단위 차이). 칸 안에서는 Z 순서
 //     u32 연결 시작[n+1]               갈림길 i의 연결 = [start[i], start[i+1])
-//     u32 상대 갈림길[m] (전체 번호), f32 길이[m] (m), u16 오르막[m], u16 내리막[m] (0.1 m),
+//     i32 상대 갈림길[m] (내 번호와의 차이), u16 길이[m] (m), u16 오르막[m], u16 내리막[m] (0.1 m),
 //     u8 길 종류[m] (4바이트 맞춤), u32 모양 번호[m]
 //       모양 번호의 맨 윗비트가 1이면 모양이 상대 갈림길 칸에 있고 거꾸로 읽음
-//     u32 모양 시작[g+1], i32 중간 점[q*2] (위도, 경도 번갈아, 양 끝 갈림길 제외)
+//     u32 모양 시작[g+1] (바이트), u8 중간 점[q]: 모양 주인 갈림길부터 위도·경도 차이를
+//       지그재그 가변 길이 정수로 번갈아 (양 끝 갈림길 제외)
 // ============================================================
 
 const routeMagic = 'GRTE';
 const routeCellDeg = 0.05; // 칸 크기 약 5 km
 const _rev = 0x80000000;
+const routeVersion = 2;
 
 /// 길 종류 (파일에 번호로 저장, 비용 배수는 앱에서 정해 자료를 다시 만들지 않고 바꿀 수 있음)
 abstract final class WayClass {
@@ -71,6 +73,8 @@ int? wayClass(Map<String, dynamic> tags) {
       return hasSidewalk ? WayClass.tertiary : WayClass.secondary;
     case 'tertiary' || 'tertiary_link':
       return WayClass.tertiary;
+    case 'service' when t('service') == 'parking_aisle' || t('service') == 'drive-through':
+      return null; // 주차장 통로 (도시에 아주 많고 걷는 길로는 쓸모없음)
     case 'unclassified' || 'residential' || 'service' || 'living_street' || 'road':
       return WayClass.minor;
     case 'track':
@@ -142,8 +146,25 @@ class RouteGraphBuilder {
   (double, double) _climb(List<int> pts) {
     final elev = elevation;
     if (elev == null) return (0, 0);
+    // 고도 격자(Copernicus DSM)는 도시에서 건물·다리 높이가 섞여 들쭉날쭉함 -> 4 m 넘게 바뀔 때만 셈.
+    // 마지막에 남은 차이는 더해서 연결 양 끝 높이 차(순 오르막)는 그대로 맞춤
     var up = 0.0, down = 0.0;
-    double? prev;
+    double? anchor, last;
+    void see(double? h) {
+      if (h == null) return;
+      last = h;
+      final a = anchor;
+      if (a == null) {
+        anchor = h;
+      } else if (h - a >= 4) {
+        up += h - a;
+        anchor = h;
+      } else if (a - h >= 4) {
+        down += a - h;
+        anchor = h;
+      }
+    }
+
     for (var i = 0; i < pts.length ~/ 2; i++) {
       final lat = pts[2 * i] / 1e6, lon = pts[2 * i + 1] / 1e6;
       if (i > 0) {
@@ -151,15 +172,15 @@ class RouteGraphBuilder {
         final plat = pts[2 * i - 2] / 1e6, plon = pts[2 * i - 1] / 1e6;
         final steps = max(1, (_distM(plat, plon, lat, lon) / 30).ceil());
         for (var s = 1; s <= steps; s++) {
-          final h = elev(plat + (lat - plat) * s / steps, plon + (lon - plon) * s / steps);
-          if (h != null && prev != null) {
-            if (h > prev) up += h - prev; else down += prev - h;
-          }
-          if (h != null) prev = h;
+          see(elev(plat + (lat - plat) * s / steps, plon + (lon - plon) * s / steps));
         }
       } else {
-        prev = elev(lat, lon);
+        see(elev(lat, lon));
       }
+    }
+    final a = anchor, l = last;
+    if (a != null && l != null) {
+      if (l > a) up += l - a; else down += a - l;
     }
     return (up, down);
   }
@@ -195,12 +216,11 @@ class RouteGraphBuilder {
 
   /// 파일로 저장하고 (갈림길 수, 연결 수) 를 돌려줌
   (int, int) write(String path) {
+    final w0 = (west * 1e6).round(), s0 = (south * 1e6).round(), step = (routeCellDeg * 1e6).round();
     final nx = ((east - west) / routeCellDeg).ceil(), ny = ((north - south) / routeCellDeg).ceil();
-    int cellOf(int lat, int lon) {
-      final cx = ((lon / 1e6 - west) / routeCellDeg).floor().clamp(0, nx - 1);
-      final cy = ((lat / 1e6 - south) / routeCellDeg).floor().clamp(0, ny - 1);
-      return cy * nx + cx;
-    }
+    // 칸 나누기는 정수로 (갈림길 위치를 칸 모서리에서의 차이 u16으로 정확히 저장하려고)
+    int cellOf(int lat, int lon) =>
+        ((lat - s0) ~/ step).clamp(0, ny - 1) * nx + ((lon - w0) ~/ step).clamp(0, nx - 1);
 
     // 1. 길을 갈림길마다 잘라 연결로 만듦
     final eA = <int>[], eB = <int>[], eCls = <int>[], eLen = <double>[], eUp = <double>[], eDown = <double>[];
@@ -233,13 +253,74 @@ class RouteGraphBuilder {
       }
     }
     _ways.clear();
-
-    // 2. 갈림길 번호: 칸 순서대로
-    final nodeKeys = <int>{for (final k in eA) k, for (final k in eB) k}.toList();
+    _uses.clear();
     int latOf(int k) => k >> 28;
     int lonOf(int k) => k & ((1 << 28) - 1);
-    final nodeCell = {for (final k in nodeKeys) k: cellOf(latOf(k), lonOf(k))};
-    nodeKeys.sort((a, b) => nodeCell[a]!.compareTo(nodeCell[b]!));
+
+    // 2. 길이 둘만 만나는 이음매(OSM에서 길이 이름·포장 등으로 나뉜 곳)는 같은 종류면 한 연결로 합침
+    final alive = List<bool>.filled(eA.length, true);
+    final inc = HashMap<int, List<int>>();
+    for (var e = 0; e < eA.length; e++) {
+      (inc[eA[e]] ??= []).add(e);
+      (inc[eB[e]] ??= []).add(e);
+    }
+    for (final k in inc.keys.toList()) {
+      final l = inc[k]!;
+      if (l.length != 2 || l[0] == l[1]) continue;
+      var e1 = l[0], e2 = l[1];
+      if (eCls[e1] != eCls[e2]) continue;
+      // e1은 k에서 끝나게, e2는 k에서 시작하게 방향을 맞춤
+      void flip(int e) {
+        final a = eA[e];
+        eA[e] = eB[e];
+        eB[e] = a;
+        final u = eUp[e];
+        eUp[e] = eDown[e];
+        eDown[e] = u;
+        final m = eMid[e], r = Int32List(m.length);
+        for (var j = 0; j < m.length ~/ 2; j++) {
+          r[2 * j] = m[m.length - 2 - 2 * j];
+          r[2 * j + 1] = m[m.length - 1 - 2 * j];
+        }
+        eMid[e] = r;
+      }
+
+      if (eB[e1] != k) flip(e1);
+      if (eA[e2] != k) flip(e2);
+      if (eA[e1] == eB[e2]) continue; // 합치면 제자리로 돌아오는 고리
+      eMid[e1] = Int32List.fromList([...eMid[e1], latOf(k), lonOf(k), ...eMid[e2]]);
+      eB[e1] = eB[e2];
+      eLen[e1] += eLen[e2];
+      eUp[e1] += eUp[e2];
+      eDown[e1] += eDown[e2];
+      alive[e2] = false;
+      final other = inc[eB[e1]]!;
+      other[other.indexOf(e2)] = e1;
+      inc.remove(k);
+    }
+    final live = [for (var e = 0; e < eA.length; e++) if (alive[e]) e];
+
+    // 3. 갈림길 번호: 칸 순서, 칸 안에서는 가까운 것끼리 (Z 순서) -> 번호 차이가 작아져 압축이 잘 됨
+    final nodeKeys = <int>{for (final e in live) eA[e], for (final e in live) eB[e]}.toList();
+    int z(int k) {
+      final la = (latOf(k) - s0) % step, lo = (lonOf(k) - w0) % step;
+      var r = 0;
+      for (var b = 0; b < 16; b++) {
+        r |= ((la >> b) & 1) << (2 * b + 1) | ((lo >> b) & 1) << (2 * b);
+      }
+      return r;
+    }
+
+    final nodeCell = HashMap<int, int>();
+    final order = HashMap<int, int>();
+    for (final k in nodeKeys) {
+      nodeCell[k] = cellOf(latOf(k), lonOf(k));
+      order[k] = z(k);
+    }
+    nodeKeys.sort((a, b) {
+      final c = nodeCell[a]!.compareTo(nodeCell[b]!);
+      return c != 0 ? c : order[a]!.compareTo(order[b]!);
+    });
     final index = HashMap<int, int>();
     for (var i = 0; i < nodeKeys.length; i++) {
       index[nodeKeys[i]] = i;
@@ -253,19 +334,23 @@ class RouteGraphBuilder {
       first[c + 1] += first[c];
     }
 
-    // 3. 갈림길마다 연결 목록 (모양은 A쪽 칸에 한 번만 저장, B쪽은 거꾸로 가리킴)
+    // 4. 갈림길마다 연결 목록 (모양은 A쪽 칸에 한 번만 저장, B쪽은 거꾸로 가리킴)
     final adj = List<List<int>>.generate(nodeKeys.length, (_) => []); // 연결 번호 * 2 (+1 = 거꾸로)
     final geomIndex = Int32List(eA.length); // 연결 -> A쪽 칸 안 모양 번호
     final geomCount = Int32List(cells);
-    for (var e = 0; e < eA.length; e++) {
+    for (final e in live) {
       final a = index[eA[e]]!, b = index[eB[e]]!;
       adj[a].add(e * 2);
       adj[b].add(e * 2 + 1);
-      final c = nodeCell[eA[e]]!;
-      geomIndex[e] = geomCount[c]++;
+    }
+    // 모양 번호는 갈림길 순서대로 매김
+    for (var i = 0; i < nodeKeys.length; i++) {
+      for (final x in adj[i]) {
+        if (x.isEven) geomIndex[x ~/ 2] = geomCount[nodeCell[nodeKeys[i]]!]++;
+      }
     }
 
-    // 4. 칸마다 묶어 압축
+    // 5. 칸마다 묶어 압축
     final blocks = <Uint8List>[];
     final codec = ZLibCodec(level: 9);
     for (var c = 0; c < cells; c++) {
@@ -274,19 +359,43 @@ class RouteGraphBuilder {
         blocks.add(Uint8List(0));
         continue;
       }
+      final cLat = s0 + (c ~/ nx) * step, cLon = w0 + (c % nx) * step;
       final nodes = [for (var i = first[c]; i < first[c + 1]; i++) i];
-      final m = nodes.fold<int>(0, (s, i) => s + adj[i].length);
-      final owned = <int>[]; // 이 칸에 모양을 둔 연결 (모양 번호 순서)
+      final flat = [for (final i in nodes) ...adj[i]];
+      final m = flat.length;
+      // 모양 점: 모양 주인 갈림길에서부터 차이를 지그재그 가변 길이 정수로
+      final pts = BytesBuilder(copy: false);
+      final gStart = <int>[];
+      void varint(int v) {
+        var u = v >= 0 ? v * 2 : -v * 2 - 1;
+        final out = <int>[];
+        while (u >= 0x80) {
+          out.add((u & 0x7f) | 0x80);
+          u >>= 7;
+        }
+        out.add(u);
+        pts.add(out);
+      }
+
       for (final i in nodes) {
         for (final x in adj[i]) {
-          if (x.isEven) owned.add(x ~/ 2);
+          if (x.isOdd) continue;
+          final mid = eMid[x ~/ 2];
+          gStart.add(pts.length);
+          var pl = latOf(nodeKeys[i]), po = lonOf(nodeKeys[i]);
+          for (var j = 0; j < mid.length; j += 2) {
+            varint(mid[j] - pl);
+            varint(mid[j + 1] - po);
+            pl = mid[j];
+            po = mid[j + 1];
+          }
         }
       }
-      owned.sort((a, b) => geomIndex[a].compareTo(geomIndex[b]));
-      final q = owned.fold<int>(0, (s, e) => s + eMid[e].length ~/ 2);
-      final g = owned.length;
+      gStart.add(pts.length);
+      final g = gStart.length - 1, q = pts.length;
       int pad4(int x) => (x + 3) & ~3;
-      final size = 16 + 8 * n + 4 * (n + 1) + 4 * m + 4 * m + 2 * m + 2 * m + pad4(m) + 4 * m + 4 * (g + 1) + 8 * q;
+      final size = 16 + pad4(4 * n) + 4 * (n + 1) + 4 * m + 2 * m + 2 * m + 2 * m + pad4(m) + pad4(2 * m) + 4 * m +
+          4 * (g + 1) + q;
       final bd = ByteData(size);
       var o = 0;
       void u32(int v) {
@@ -294,43 +403,48 @@ class RouteGraphBuilder {
         o += 4;
       }
 
+      void u16(int v) {
+        bd.setUint16(o, v, Endian.little);
+        o += 2;
+      }
+
       u32(n);
       u32(m);
       u32(g);
       u32(q);
       for (final i in nodes) {
-        bd.setInt32(o, latOf(nodeKeys[i]), Endian.little);
-        o += 4;
+        u16(latOf(nodeKeys[i]) - cLat);
       }
       for (final i in nodes) {
-        bd.setInt32(o, lonOf(nodeKeys[i]), Endian.little);
-        o += 4;
+        u16(lonOf(nodeKeys[i]) - cLon);
       }
+      o = pad4(o);
       var s = 0;
       for (final i in nodes) {
         u32(s);
         s += adj[i].length;
       }
       u32(s);
-      final flat = [for (final i in nodes) ...adj[i]];
-      for (final x in flat) {
-        final e = x ~/ 2;
-        u32(index[x.isEven ? eB[e] : eA[e]]!);
+      var self = first[c];
+      for (final i in nodes) {
+        for (final x in adj[i]) {
+          final e = x ~/ 2;
+          bd.setInt32(o, index[x.isEven ? eB[e] : eA[e]]! - self, Endian.little);
+          o += 4;
+        }
+        self++;
       }
       for (final x in flat) {
-        bd.setFloat32(o, eLen[x ~/ 2], Endian.little);
-        o += 4;
+        u16(eLen[x ~/ 2].round().clamp(0, 65535));
       }
       int dm(double v) => (v * 10).round().clamp(0, 65535);
       for (final x in flat) {
         final e = x ~/ 2;
-        bd.setUint16(o, dm(x.isEven ? eUp[e] : eDown[e]), Endian.little);
-        o += 2;
+        u16(dm(x.isEven ? eUp[e] : eDown[e]));
       }
       for (final x in flat) {
         final e = x ~/ 2;
-        bd.setUint16(o, dm(x.isEven ? eDown[e] : eUp[e]), Endian.little);
-        o += 2;
+        u16(dm(x.isEven ? eDown[e] : eUp[e]));
       }
       for (final x in flat) {
         bd.setUint8(o++, eCls[x ~/ 2]);
@@ -339,30 +453,22 @@ class RouteGraphBuilder {
       for (final x in flat) {
         u32(geomIndex[x ~/ 2] | (x.isOdd ? _rev : 0));
       }
-      var p = 0;
-      for (final e in owned) {
-        u32(p);
-        p += eMid[e].length ~/ 2;
+      for (final v in gStart) {
+        u32(v);
       }
-      u32(p);
-      for (final e in owned) {
-        for (final v in eMid[e]) {
-          bd.setInt32(o, v, Endian.little);
-          o += 4;
-        }
-      }
-      assert(o == size);
-      blocks.add(Uint8List.fromList(codec.encode(bd.buffer.asUint8List())));
+      bd.buffer.asUint8List().setRange(o, o + q, pts.takeBytes());
+      o += q;
+      blocks.add(Uint8List.fromList(codec.encode(bd.buffer.asUint8List(0, o))));
     }
 
     final head = ByteData(48 + 4 * (cells + 1) + 8 * (cells + 1));
     for (var i = 0; i < 4; i++) {
       head.setUint8(i, routeMagic.codeUnitAt(i));
     }
-    head.setUint16(4, 1, Endian.little);
-    head.setFloat64(8, west, Endian.little);
-    head.setFloat64(16, south, Endian.little);
-    head.setFloat64(24, routeCellDeg, Endian.little);
+    head.setUint16(4, routeVersion, Endian.little);
+    head.setFloat64(8, w0 / 1e6, Endian.little);
+    head.setFloat64(16, s0 / 1e6, Endian.little);
+    head.setFloat64(24, step / 1e6, Endian.little);
     head.setUint32(32, nx, Endian.little);
     head.setUint32(36, ny, Endian.little);
     head.setUint32(40, nodeKeys.length, Endian.little);
@@ -381,7 +487,7 @@ class RouteGraphBuilder {
       out.writeFromSync(b);
     }
     out.closeSync();
-    return (nodeKeys.length, eA.length);
+    return (nodeKeys.length, live.length);
   }
 }
 
@@ -389,38 +495,45 @@ class RouteGraphBuilder {
 
 class _Cell {
   final int first; // 이 칸 첫 갈림길의 전체 번호
-  final Int32List lat, lon, pts;
-  final Uint32List start, to, geom, gStart;
-  final Float32List len;
-  final Uint16List up, down;
-  final Uint8List cls;
-  _Cell(this.first, this.lat, this.lon, this.start, this.to, this.len, this.up, this.down, this.cls, this.geom,
-      this.gStart, this.pts);
+  final int lat0, lon0; // 칸 남서쪽 모서리 (백만분의 1도)
+  final Uint16List dLat, dLon, len, up, down;
+  final Uint32List start, geom, gStart;
+  final Int32List dTo;
+  final Uint8List cls, pts;
+  _Cell(this.first, this.lat0, this.lon0, this.dLat, this.dLon, this.start, this.dTo, this.len, this.up, this.down,
+      this.cls, this.geom, this.gStart, this.pts);
 
-  static _Cell parse(int first, Uint8List raw) {
+  int get count => dLat.length;
+  int latE6(int i) => lat0 + dLat[i];
+  int lonE6(int i) => lon0 + dLon[i];
+  int to(int i, int k) => first + i + dTo[k];
+
+  static _Cell parse(int first, int lat0, int lon0, Uint8List raw) {
     final b = raw.buffer;
     final h = ByteData.sublistView(raw, 0, 16);
     final n = h.getUint32(0, Endian.little), m = h.getUint32(4, Endian.little);
     final g = h.getUint32(8, Endian.little), q = h.getUint32(12, Endian.little);
     var o = raw.offsetInBytes + 16;
+    int pad4(int x) => (x + 3) & ~3;
     T take<T>(T Function(int off) f, int bytes) {
       final r = f(o);
       o += bytes;
       return r;
     }
 
-    final lat = take((x) => b.asInt32List(x, n), 4 * n);
-    final lon = take((x) => b.asInt32List(x, n), 4 * n);
+    final dLat = take((x) => b.asUint16List(x, n), 2 * n);
+    final dLon = take((x) => b.asUint16List(x, n), pad4(4 * n) - 2 * n);
     final start = take((x) => b.asUint32List(x, n + 1), 4 * (n + 1));
-    final to = take((x) => b.asUint32List(x, m), 4 * m);
-    final len = take((x) => b.asFloat32List(x, m), 4 * m);
+    final dTo = take((x) => b.asInt32List(x, m), 4 * m);
+    final len = take((x) => b.asUint16List(x, m), 2 * m);
     final up = take((x) => b.asUint16List(x, m), 2 * m);
     final down = take((x) => b.asUint16List(x, m), 2 * m);
-    final cls = take((x) => b.asUint8List(x, m), (m + 3) & ~3);
+    final cls = take((x) => b.asUint8List(x, m), 0);
+    o = pad4(o + m);
     final geom = take((x) => b.asUint32List(x, m), 4 * m);
     final gStart = take((x) => b.asUint32List(x, g + 1), 4 * (g + 1));
-    final pts = take((x) => b.asInt32List(x, 2 * q), 8 * q);
-    return _Cell(first, lat, lon, start, to, len, up, down, cls, geom, gStart, pts);
+    final pts = take((x) => b.asUint8List(x, q), q);
+    return _Cell(first, lat0, lon0, dLat, dLon, start, dTo, len, up, down, cls, geom, gStart, pts);
   }
 }
 
@@ -440,6 +553,10 @@ class RouteGraph {
     if (h.lengthInBytes < 48 || String.fromCharCodes(h.buffer.asUint8List(h.offsetInBytes, 4)) != routeMagic) {
       f.closeSync();
       throw const FormatException('길찾기 자료 파일이 아님');
+    }
+    if (h.getUint16(4, Endian.little) != routeVersion) {
+      f.closeSync();
+      throw const RouteException('길찾기 자료가 예전 형식입니다. 오프라인 지도에서 "길찾기"를 업데이트해 주세요');
     }
     final nx = h.getUint32(32, Endian.little), ny = h.getUint32(36, Endian.little);
     final cells = nx * ny;
@@ -465,7 +582,9 @@ class RouteGraph {
         if (len == 0) return null;
         _f.setPositionSync(_offs[c]);
         final raw = Uint8List.fromList(zlib.decode(_f.readSync(len)));
-        return _Cell.parse(_first[c], raw);
+        final step = (cell * 1e6).round();
+        return _Cell.parse(_first[c], (south * 1e6).round() + (c ~/ nx) * step, (west * 1e6).round() + (c % nx) * step,
+            raw);
       });
 
   /// 갈림길 번호 -> 칸 번호 (first에서 이분 탐색)
@@ -486,19 +605,38 @@ class RouteGraph {
 
   (double, double) nodePos(int node) {
     final c = _cellFor(node), i = node - c.first;
-    return (c.lat[i] / 1e6, c.lon[i] / 1e6);
+    return (c.latE6(i) / 1e6, c.lonE6(i) / 1e6);
   }
 
   /// 갈림길 [node]의 [k]번째 연결(칸 안 번호)의 모양: 출발 갈림길부터 도착 갈림길까지 점 목록
   List<(double, double)> edgeShape(int node, int k) {
     final c = _cellFor(node);
-    final to = c.to[k], gRef = c.geom[k];
+    final to = c.to(node - c.first, k), gRef = c.geom[k];
     final reversed = gRef & _rev != 0;
+    final ownerNode = reversed ? to : node;
     final owner = reversed ? _cellFor(to) : c;
     final gi = gRef & ~_rev;
-    final mid = [
-      for (var j = owner.gStart[gi]; j < owner.gStart[gi + 1]; j++) (owner.pts[2 * j] / 1e6, owner.pts[2 * j + 1] / 1e6)
-    ];
+    final oi = ownerNode - owner.first;
+    var lat = owner.latE6(oi), lon = owner.lonE6(oi);
+    final mid = <(double, double)>[];
+    var j = owner.gStart[gi];
+    final end = owner.gStart[gi + 1];
+    int read() {
+      var u = 0, shift = 0;
+      while (true) {
+        final b = owner.pts[j++];
+        u |= (b & 0x7f) << shift;
+        if (b < 0x80) break;
+        shift += 7;
+      }
+      return u.isEven ? u >> 1 : -((u + 1) >> 1);
+    }
+
+    while (j < end) {
+      lat += read();
+      lon += read();
+      mid.add((lat / 1e6, lon / 1e6));
+    }
     return [nodePos(node), ...(reversed ? mid.reversed : mid), nodePos(to)];
   }
 }
@@ -560,7 +698,7 @@ _Snap? _snap(RouteGraph g, double lat, double lon, double maxGap) {
       if (cx < 0 || cy < 0 || cx >= g.nx || cy >= g.ny) continue;
       final cell = g._load(cy * g.nx + cx);
       if (cell == null) continue;
-      for (var i = 0; i < cell.lat.length; i++) {
+      for (var i = 0; i < cell.count; i++) {
         for (var k = cell.start[i]; k < cell.start[i + 1]; k++) {
           if (cell.geom[k] & _rev != 0) continue; // 연결마다 한 번만 (모양을 가진 쪽에서)
           final node = cell.first + i;
@@ -592,7 +730,7 @@ _Snap? _snap(RouteGraph g, double lat, double lon, double maxGap) {
             if (d < best) {
               best = d;
               final at = (shape[j].$1 + (shape[j + 1].$1 - shape[j].$1) * t, shape[j].$2 + (shape[j + 1].$2 - shape[j].$2) * t);
-              out = _Snap(node, k, cell.to[k], shape, j, at, total == 0 ? 0 : (along + segLen[j] * t) / total, d,
+              out = _Snap(node, k, cell.to(i, k), shape, j, at, total == 0 ? 0 : (along + segLen[j] * t) / total, d,
                   cell.len[k].toDouble(), cell.up[k] / 10, cell.down[k] / 10, cell.cls[k]);
             }
             along += segLen[j];
@@ -729,10 +867,10 @@ FoundRoute findRoute(RouteGraph g, double lat1, double lon1, double lat2, double
     }
     final c = g._cellFor(u), i = u - c.first;
     for (var k = c.start[i]; k < c.start[i + 1]; k++) {
-      final v = c.to[k];
+      final v = c.to(i, k);
       if (done.contains(v)) continue;
       final (la, lo) = g.nodePos(v);
-      relax(u, v, edgeCost(c.len[k], c.up[k] / 10, c.down[k] / 10, c.cls[k]), k, la, lo);
+      relax(u, v, edgeCost(c.len[k].toDouble(), c.up[k] / 10, c.down[k] / 10, c.cls[k]), k, la, lo);
     }
     final p = toGoal[u];
     if (p != null) relax(u, _goal, edgeCost(p.$2, p.$3, p.$4, p.$5), -1, 0, 0);
