@@ -402,7 +402,7 @@ List<Map<String, dynamic>> _complexNameLayers(String s) => [
         'layout': {
           'text-field': ['get', 'name'],
           'text-font': ['NotoSansMedium'],
-          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 12, 17, 16],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 10, 17, 14],
           'text-letter-spacing': 0.15,
           'text-max-width': 12,
           'text-padding': 1,
