@@ -306,6 +306,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
     placed = true;
   }
   if (!placed) layers.addAll([...bands, ...contours, ...contourLabels, ...nameLayers]); // 기본 지도 없이 받은 경우
+  layers.addAll([for (final p in names) ..._complexNameLayers('l_${p.id}')]);
   layers.addAll(_meLayers);
 
   return jsonEncode({
@@ -387,9 +388,10 @@ List<Map<String, dynamic>> _contourLabelLayers(String s) => [
 
 const _isDong = ['==', ['get', 'dong'], 1];
 
-/// 아파트 단지 이름("구곡현대2차아파트")은 확대 14부터 크게.
-/// 건물은 확대 15~16에서 "101동"만 굵게, 17부터는 "잠실엘스 101동" 전체 이름. 동 번호를 다른 건물 이름보다 먼저 자리 잡게 함
-List<Map<String, dynamic>> _buildingNameLayers(String s) => [
+/// 아파트 단지 이름("구곡현대2차아파트"): 단지 부지 가운데에 넓은 자간의 회색 글씨.
+/// 다른 라벨(동 번호·번지·가게)보다 먼저 자리를 잡도록 모든 지도 레이어 뒤(위)에 둠 — MapLibre는 위 레이어부터 배치.
+/// 가운데가 막히면 위·아래·옆으로 조금 비켜서라도 표시
+List<Map<String, dynamic>> _complexNameLayers(String s) => [
       {
         'id': '$s-complex',
         'type': 'symbol',
@@ -400,13 +402,19 @@ List<Map<String, dynamic>> _buildingNameLayers(String s) => [
         'layout': {
           'text-field': ['get', 'name'],
           'text-font': ['NotoSansMedium'],
-          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 11.5, 17, 15],
-          'text-letter-spacing': 0.08,
-          'text-max-width': 8,
-          'text-padding': 4,
+          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 12, 17, 16],
+          'text-letter-spacing': 0.15,
+          'text-max-width': 12,
+          'text-padding': 1,
+          'text-variable-anchor': ['center', 'top', 'bottom', 'left', 'right'],
+          'text-radial-offset': 0.8,
         },
-        'paint': {'text-color': '#55504a', 'text-halo-color': '#ffffff', 'text-halo-width': 1.6},
+        'paint': {'text-color': '#6f6a64', 'text-halo-color': '#ffffff', 'text-halo-width': 1.4},
       },
+    ];
+
+/// 건물은 확대 15~16에서 "101동"만 굵게, 17부터는 "잠실엘스 101동" 전체 이름. 동 번호를 다른 건물 이름보다 먼저 자리 잡게 함
+List<Map<String, dynamic>> _buildingNameLayers(String s) => [
       {
         'id': '$s-dong',
         'type': 'symbol',
