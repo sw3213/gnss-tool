@@ -1,9 +1,9 @@
 name: Build building labels
 
-# 아파트 "101동" 같은 건물 이름을 OpenStreetMap 한국 데이터(Geofabrik)에서 뽑아
+# 아파트 "101동" 같은 건물 이름과 "구곡현대2차아파트" 같은 단지 이름을 OpenStreetMap 한국 데이터(Geofabrik)에서 뽑아
 # 작은 벡터 지도(kr-labels.pmtiles, 레이어 bldg)로 만들어 Release "maps"에 올림.
 # Protomaps 기본 지도는 건물 이름을 넣지 않아서 따로 만듦. 앱은 kind="labels"를 기본 지도 위에 겹침.
-#   bldg: 점, 속성 name(전체 이름), short(동 번호만), dong(1 = 동 번호 있음)
+#   bldg: 점, 속성 kind(bldg 건물 / complex 단지), name(전체 이름), short(동 번호만), dong(1 = 동 번호 있음)
 
 on:
   workflow_dispatch:
@@ -34,18 +34,17 @@ jobs:
           curl -sfL -o kr.osm.pbf https://download.geofabrik.de/asia/south-korea-latest.osm.pbf
           ls -la kr.osm.pbf
 
-      - name: Named buildings -> label points
+      - name: Named buildings and residential areas -> label points
         run: |
-          osmium tags-filter -O -o b.osm.pbf kr.osm.pbf w/building r/building
+          osmium tags-filter -O -o b.osm.pbf kr.osm.pbf wr/building wr/landuse=residential
           osmium tags-filter -O -o bn.osm.pbf b.osm.pbf w/name,addr:housename r/name,addr:housename
-          osmium export -O -f geojsonseq --geometry-types=polygon -o buildings.geojsons bn.osm.pbf
-          python3 maps/build_labels.py buildings.geojsons labels.geojsons
-          grep -c '"dong": 1' labels.geojsons || true
+          osmium export -O -f geojsonseq --geometry-types=polygon -o areas.geojsons bn.osm.pbf
+          python3 maps/build_labels.py areas.geojsons labels.geojsons
 
       - name: Vector tiles
         run: |
-          # z15 하나에 모든 점을 담고(빠짐없이), 앱이 z16 이상은 확대해서 씀
-          tippecanoe -f -o kr-labels.pmtiles -l bldg -Z15 -z15 -r1 \
+          # z13~15에 모든 점을 빠짐없이 담음 (단지 이름은 z14부터, 동 번호는 z15부터 그림). z16 이상은 z15를 확대해서 씀
+          tippecanoe -f -o kr-labels.pmtiles -l bldg -Z13 -z15 -r1 \
             --no-feature-limit --no-tile-size-limit labels.geojsons
           ls -la kr-labels.pmtiles
 
@@ -60,7 +59,7 @@ jobs:
           jq --arg url "https://github.com/$REPO/releases/download/maps/kr-labels.pmtiles" \
              --arg date "$date" --argjson size "$size" \
              '[.[] | select(.kind != "labels")] + [{
-                id: "kr-labels", name: "대한민국 건물 이름 (아파트 동 번호)", kind: "labels",
+                id: "kr-labels", name: "대한민국 건물·아파트 이름", kind: "labels",
                 bbox: [124.5, 33.0, 132.0, 38.7], url: $url, date: $date, size: $size, maxzoom: 15
               }]' old.json > catalog.json
           cat catalog.json

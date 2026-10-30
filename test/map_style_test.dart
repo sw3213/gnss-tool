@@ -71,6 +71,14 @@ void main() {
     }
   });
 
+  test('download list merges a country into one card', () {
+    MapPack p(String id, String kind) => MapPack(id, id == 'kr' ? '대한민국' : '대한민국 x', 'u', '2026-10-30', const [0, 0, 1, 1], 1, kind: kind);
+    final b = bundleCatalog([p('kr-dem', 'dem'), p('kr-labels', 'labels'), p('kr', 'basemap'), p('kr-terrain', 'terrain'), p('jp', 'basemap')]);
+    expect(b.length, 2);
+    expect([for (final x in b.first) x.kind], ['basemap', 'terrain', 'labels', 'dem']);
+    expect(bundleTitle(b.first), '대한민국');
+  });
+
   test('scale bar picks a round length that fits', () {
     // 원주(위도 37.3), 확대 15: dp당 약 1.9 m -> 100 dp 안에 100 m
     final mpp = ScaleBar.metersPerDp(37.3, 15);

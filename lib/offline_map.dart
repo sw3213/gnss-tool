@@ -387,14 +387,33 @@ List<Map<String, dynamic>> _contourLabelLayers(String s) => [
 
 const _isDong = ['==', ['get', 'dong'], 1];
 
-/// 확대 15~16은 "101동"만 굵게, 17부터는 "잠실엘스 101동" 전체 이름. 동 번호를 다른 건물 이름보다 먼저 자리 잡게 함
+/// 아파트 단지 이름("구곡현대2차아파트")은 확대 14부터 크게.
+/// 건물은 확대 15~16에서 "101동"만 굵게, 17부터는 "잠실엘스 101동" 전체 이름. 동 번호를 다른 건물 이름보다 먼저 자리 잡게 함
 List<Map<String, dynamic>> _buildingNameLayers(String s) => [
+      {
+        'id': '$s-complex',
+        'type': 'symbol',
+        'source': s,
+        'source-layer': 'bldg',
+        'minzoom': 14,
+        'filter': ['==', ['get', 'kind'], 'complex'],
+        'layout': {
+          'text-field': ['get', 'name'],
+          'text-font': ['NotoSansMedium'],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 11.5, 17, 15],
+          'text-letter-spacing': 0.08,
+          'text-max-width': 8,
+          'text-padding': 4,
+        },
+        'paint': {'text-color': '#55504a', 'text-halo-color': '#ffffff', 'text-halo-width': 1.6},
+      },
       {
         'id': '$s-dong',
         'type': 'symbol',
         'source': s,
         'source-layer': 'bldg',
         'minzoom': 15,
+        'filter': ['!=', ['get', 'kind'], 'complex'],
         'layout': {
           'text-field': ['step', ['zoom'], ['get', 'short'], 17, ['get', 'name']],
           'text-font': ['NotoSansMedium'],
@@ -467,7 +486,7 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
           'line-dasharray': [2, 1.2],
         },
       },
-      // 아파트 단지·학교·공원 등 구역 이름 ("구곡청솔1차아파트")
+      // 학교·공원 등 구역 이름 (아파트 단지 이름은 건물 이름 지도의 complex가 그림)
       {
         'id': '$s-area-names',
         'type': 'symbol',
@@ -480,7 +499,7 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
           [
             'in',
             ['get', 'kind'],
-            ['literal', ['residential', 'school', 'university', 'college', 'hospital', 'park', 'cemetery', 'military', 'industrial', 'commercial']],
+            ['literal', ['school', 'university', 'college', 'hospital', 'park', 'cemetery', 'military', 'industrial', 'commercial']],
           ],
         ],
         'layout': {
@@ -637,7 +656,7 @@ class MapControl {
     (id: 'bands', label: '고도 색칠', icon: Icons.gradient, suffixes: ['-bands']),
     (id: 'trails', label: '등산로 강조', icon: Icons.hiking, suffixes: ['-trails']),
     (id: 'pois', label: '장소 아이콘', icon: Icons.place_outlined, suffixes: ['-pois']),
-    (id: 'dong', label: '건물 이름·아파트 동', icon: Icons.apartment, suffixes: ['-dong']),
+    (id: 'dong', label: '건물·아파트 이름', icon: Icons.apartment, suffixes: ['-dong', '-complex']),
     (id: 'water', label: '수원지 번호', icon: Icons.water_drop_outlined, suffixes: ['water-pt', 'water-num']),
   ];
 
@@ -1044,15 +1063,18 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
     }
   }
 
-  Future<void> _download(MapPack p) async {
+  /// 한 나라의 지도·지형·건물 이름·분석 데이터를 한꺼번에 받음 ([parts]는 아직 없거나 새 버전이 나온 것만)
+  Future<void> _downloadAll(String title, List<MapPack> parts) async {
+    final size = parts.fold<int>(0, (a, p) => a + p.size);
     // 어떤 네트워크로 받을지 누를 때마다 고름
     final wifiOnly = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('${p.name} 지도 (${formatBytes(p.size)})'),
+        title: Text('$title (${formatBytes(size)})'),
         content: Text('어떻게 받을까요?\n\n'
             '안드로이드 다운로드 관리자가 받으므로 앱을 닫거나 화면을 꺼도 계속 받고, '
-            '끊기면 자동으로 이어받습니다. 진행률은 알림창에서도 볼 수 있습니다.\n\n지도 날짜: ${p.date}'),
+            '끊기면 자동으로 이어받습니다. 진행률은 알림창에서도 볼 수 있습니다.\n\n'
+            '${parts.map((p) => '· ${p.name}').join('\n')}'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('모바일 데이터도 사용')),
@@ -1062,7 +1084,9 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
     );
     if (wifiOnly == null) return;
     try {
-      await store.download(p, wifiOnly: wifiOnly);
+      for (final p in parts) {
+        await store.download(p, wifiOnly: wifiOnly);
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('다운로드를 시작하지 못했습니다: $e')));
@@ -1099,7 +1123,7 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
                     child: Center(child: CircularProgressIndicator()),
                   )
                 else
-                  for (final p in catalog) _tile(p, installed, progress),
+                  for (final parts in bundleCatalog(catalog)) _bundle(parts, installed, progress),
                 const SizedBox(height: 12),
                 Card(
                   child: ListTile(
@@ -1124,42 +1148,135 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
     );
   }
 
-  Widget _tile(MapPack p, List<MapPack> installed, Map<String, DlState> progress) {
-    final mine = installed.where((x) => x.id == p.id).firstOrNull;
-    final pr = progress[p.id];
-    final failed = store.failures.value[p.id];
+  /// 나라 하나 = 카드 하나. 지도·지형·건물 이름·분석 데이터를 한 번에 받고, 진행률도 합쳐서 보여 줌
+  Widget _bundle(List<MapPack> parts, List<MapPack> installed, Map<String, DlState> progress) {
+    final title = bundleTitle(parts);
+    final total = parts.fold<int>(0, (a, p) => a + p.size);
+    MapPack? mine(MapPack p) => installed.where((x) => x.id == p.id).firstOrNull;
+    bool fresh(MapPack p) => mine(p) != null && mine(p)!.date.compareTo(p.date) >= 0;
+    final busy = [for (final p in parts) if (progress.containsKey(p.id)) p];
+    final need = [for (final p in parts) if (!fresh(p) && !progress.containsKey(p.id)) p];
+    final failed = [for (final p in parts) if (store.failures.value[p.id] != null) store.failures.value[p.id]!];
+    final have = parts.where((p) => mine(p) != null).toList();
+    final newest = parts.map((p) => p.date).reduce((a, b) => a.compareTo(b) >= 0 ? a : b);
+
     final String sub;
     final Widget trailing;
-    if (pr != null) {
-      sub = pr.text;
-      trailing = IconButton(icon: const Icon(Icons.close), tooltip: '취소', onPressed: () => store.cancel(p.id));
-    } else if (mine == null) {
-      sub = failed ?? '${formatBytes(p.size)}  ·  ${p.date}';
-      trailing = IconButton(icon: const Icon(Icons.download), tooltip: '다운로드', onPressed: () => _download(p));
+    double? fraction;
+    if (busy.isNotEmpty) {
+      // 받은 크기 합 / 전체 크기 (진행률을 아직 모르는 항목은 0으로)
+      var done = 0.0;
+      for (final p in parts) {
+        if (progress.containsKey(p.id)) {
+          done += (progress[p.id]!.fraction ?? 0) * p.size;
+        } else if (fresh(p)) {
+          done += p.size;
+        }
+      }
+      fraction = done / total;
+      final waiting = busy.map((p) => progress[p.id]!.text).firstWhere((t) => !t.startsWith('다운로드 중'),
+          orElse: () => '');
+      sub = '받는 중 ${(fraction * 100).floor()}%  (${formatBytes(done.round())} / ${formatBytes(total)})'
+          '${waiting.isEmpty ? '' : '\n$waiting'}';
+      trailing = IconButton(
+        icon: const Icon(Icons.close),
+        tooltip: '취소',
+        onPressed: () async {
+          for (final p in busy) {
+            await store.cancel(p.id);
+          }
+        },
+      );
+    } else if (need.isEmpty) {
+      sub = '받음  ·  ${formatBytes(total)}  ·  $newest';
+      trailing = IconButton(icon: const Icon(Icons.delete_outline), tooltip: '삭제', onPressed: () => _deleteAll(title, have));
     } else {
-      final outdated = mine.date.compareTo(p.date) < 0;
-      sub = outdated ? '받은 지도 ${mine.date} → 새 버전 ${p.date}' : '받음  ·  ${formatBytes(mine.size)}  ·  ${mine.date}';
+      final needSize = need.fold<int>(0, (a, p) => a + p.size);
+      sub = failed.isNotEmpty
+          ? failed.first
+          : have.isEmpty
+              ? '${formatBytes(total)}  ·  $newest'
+              : '새 버전·빠진 항목 ${need.length}개 (${formatBytes(needSize)})';
       trailing = Row(mainAxisSize: MainAxisSize.min, children: [
-        if (outdated)
-          IconButton(icon: const Icon(Icons.update), tooltip: '업데이트', onPressed: () => _download(p)),
         IconButton(
-          icon: const Icon(Icons.delete_outline),
-          tooltip: '삭제',
-          onPressed: () => store.delete(p.id),
+          icon: Icon(have.isEmpty ? Icons.download : Icons.update),
+          tooltip: have.isEmpty ? '다운로드' : '업데이트',
+          onPressed: () => _downloadAll(title, need),
         ),
+        if (have.isNotEmpty)
+          IconButton(icon: const Icon(Icons.delete_outline), tooltip: '삭제', onPressed: () => _deleteAll(title, have)),
       ]);
     }
+    final complete = need.isEmpty && busy.isEmpty;
     return Card(
       child: Column(children: [
         ListTile(
-          leading: Icon(mine != null ? Icons.check_circle : Icons.public,
-              color: mine != null ? Colors.lightGreenAccent : null),
-          title: Text(p.name),
+          leading: Icon(complete ? Icons.check_circle : Icons.public, color: complete ? Colors.lightGreenAccent : null),
+          title: Text(title),
           subtitle: Text(sub),
           trailing: trailing,
         ),
-        if (pr != null) LinearProgressIndicator(value: pr.fraction),
+        if (busy.isNotEmpty) LinearProgressIndicator(value: fraction),
+        // 무엇이 들어 있는지 (작게)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+          child: Wrap(spacing: 6, runSpacing: 6, children: [
+            for (final p in parts)
+              Chip(
+                visualDensity: VisualDensity.compact,
+                avatar: Icon(
+                  fresh(p)
+                      ? Icons.check
+                      : progress.containsKey(p.id)
+                          ? Icons.downloading
+                          : Icons.cloud_outlined,
+                  size: 16,
+                ),
+                label: Text('${partLabel(p)} ${formatBytes(p.size)}', style: const TextStyle(fontSize: 12)),
+              ),
+          ]),
+        ),
       ]),
     );
   }
+
+  Future<void> _deleteAll(String title, List<MapPack> parts) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('$title 지도를 지울까요?'),
+        content: const Text('지도·지형·건물 이름·분석 데이터를 모두 지웁니다. 다시 받을 수 있습니다.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('삭제')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    for (final p in parts) {
+      await store.delete(p.id);
+    }
+  }
 }
+
+/// 카탈로그를 나라별로 묶음: "kr", "kr-terrain", "kr-labels", "kr-dem" -> 대한민국 하나
+List<List<MapPack>> bundleCatalog(List<MapPack> catalog) {
+  const order = ['basemap', 'terrain', 'labels', 'dem'];
+  final groups = <String, List<MapPack>>{};
+  for (final p in catalog) {
+    groups.putIfAbsent(p.id.split('-').first, () => []).add(p);
+  }
+  int rank(MapPack p) => order.contains(p.kind) ? order.indexOf(p.kind) : order.length;
+  return [for (final g in groups.values) g..sort((a, b) => rank(a).compareTo(rank(b)))];
+}
+
+String bundleTitle(List<MapPack> parts) =>
+    (parts.where((p) => p.kind == 'basemap').firstOrNull ?? parts.first).name.split(' ').first;
+
+String partLabel(MapPack p) => switch (p.kind) {
+      'basemap' => '지도',
+      'terrain' => '등고선',
+      'labels' => '건물·아파트 이름',
+      'dem' => '지형 분석',
+      _ => p.name,
+    };
