@@ -1,0 +1,67 @@
+name: Build building labels
+
+# 아파트 "101동" 같은 건물 이름을 OpenStreetMap 한국 데이터(Geofabrik)에서 뽑아
+# 작은 벡터 지도(kr-labels.pmtiles, 레이어 bldg)로 만들어 Release "maps"에 올림.
+# Protomaps 기본 지도는 건물 이름을 넣지 않아서 따로 만듦. 앱은 kind="labels"를 기본 지도 위에 겹침.
+#   bldg: 점, 속성 name(전체 이름), short(동 번호만), dong(1 = 동 번호 있음)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 5 1 * *' # 매월 1일 (기본 지도 갱신 뒤)
+
+permissions:
+  contents: write
+
+jobs:
+  labels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install osmium and tippecanoe
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q osmium-tool libsqlite3-dev zlib1g-dev jq
+          git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
+          make -C /tmp/tippecanoe -j"$(nproc)" >/dev/null
+          sudo make -C /tmp/tippecanoe install >/dev/null
+          osmium --version
+          tippecanoe --version
+
+      - name: Download OpenStreetMap (South Korea)
+        run: |
+          curl -sfL -o kr.osm.pbf https://download.geofabrik.de/asia/south-korea-latest.osm.pbf
+          ls -la kr.osm.pbf
+
+      - name: Named buildings -> label points
+        run: |
+          osmium tags-filter -O -o b.osm.pbf kr.osm.pbf w/building r/building
+          osmium tags-filter -O -o bn.osm.pbf b.osm.pbf w/name,addr:housename r/name,addr:housename
+          osmium export -O -f geojsonseq --geometry-types=polygon -o buildings.geojsons bn.osm.pbf
+          python3 maps/build_labels.py buildings.geojsons labels.geojsons
+          grep -c '"dong": 1' labels.geojsons || true
+
+      - name: Vector tiles
+        run: |
+          # z15 하나에 모든 점을 담고(빠짐없이), 앱이 z16 이상은 확대해서 씀
+          tippecanoe -f -o kr-labels.pmtiles -l bldg -Z15 -z15 -r1 \
+            --no-feature-limit --no-tile-size-limit labels.geojsons
+          ls -la kr-labels.pmtiles
+
+      - name: Publish to release "maps"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          size=$(stat -c %s kr-labels.pmtiles)
+          date=$(date -u +%Y-%m-%d)
+          gh release download maps -p catalog.json -O old.json 2>/dev/null || echo '[]' > old.json
+          jq --arg url "https://github.com/$REPO/releases/download/maps/kr-labels.pmtiles" \
+             --arg date "$date" --argjson size "$size" \
+             '[.[] | select(.kind != "labels")] + [{
+                id: "kr-labels", name: "대한민국 건물 이름 (아파트 동 번호)", kind: "labels",
+                bbox: [124.5, 33.0, 132.0, 38.7], url: $url, date: $date, size: $size, maxzoom: 15
+              }]' old.json > catalog.json
+          cat catalog.json
+          gh release upload maps kr-labels.pmtiles catalog.json --clobber

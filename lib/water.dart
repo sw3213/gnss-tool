@@ -354,7 +354,7 @@ const _zoom = 14;
 double _sinh(double x) => (exp(x) - exp(-x)) / 2;
 
 /// 가까운 수원지 [count]곳. 같은 계곡이 타일마다 조각나 있으므로 이름이 같거나 300 m 안에 붙은 것은 하나로 침
-List<WaterSource> nearestWaters(PmTiles pm, double lat, double lon, {int count = 3, int maxRing = 4}) {
+List<WaterSource> nearestWaters(PmTiles pm, double lat, double lon, {int count = 5, int maxRing = 4}) {
   final (cx, cy) = _tileXY(lat, lon);
   final mLat = 111320.0, mLon = 111320.0 * cos(lat * pi / 180);
   final tileM = 40075016.686 * cos(lat * pi / 180) / (1 << _zoom);

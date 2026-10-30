@@ -80,8 +80,10 @@ class _MainScreenState extends State<MainScreen> {
     final s = widget.snap.value;
     showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true, // 5곳이면 화면 절반을 넘을 수 있음
       builder: (ctx) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
+        child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
           const ListTile(
             title: Text('가까운 수원지', style: TextStyle(fontWeight: FontWeight.bold)),
             subtitle: Text('흐르는 물·샘·식수대·호수만 (소류지·저수지·연못·농수로 제외). 마시기 전 반드시 끓이거나 정수하세요'),
@@ -105,7 +107,32 @@ class _MainScreenState extends State<MainScreen> {
                 widget.map.follow.value = false;
               },
             ),
-        ]),
+        ])),
+      ),
+    );
+  }
+
+  /// 레이어 켜고 끄기 (등고선, 고도 색칠, 등산로…). 선택은 저장되어 다음에도 유지
+  void _showLayers() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          child: ValueListenableBuilder<Set<String>>(
+            valueListenable: widget.map.hidden,
+            builder: (_, hidden, __) => Column(mainAxisSize: MainAxisSize.min, children: [
+              const ListTile(title: Text('지도 레이어', style: TextStyle(fontWeight: FontWeight.bold))),
+              for (final g in MapControl.layerGroups)
+                SwitchListTile(
+                  secondary: Icon(g.icon),
+                  title: Text(g.label),
+                  value: !hidden.contains(g.id),
+                  onChanged: (on) => widget.map.setLayerShown(g.id, on),
+                ),
+            ]),
+          ),
+        ),
       ),
     );
   }
@@ -249,6 +276,12 @@ class _MainScreenState extends State<MainScreen> {
               right: 10,
               bottom: ext * box.maxHeight + 10,
               child: Column(children: [
+                _RoundButton(
+                  tooltip: '지도 레이어',
+                  onTap: _showLayers,
+                  child: const Icon(Icons.layers_outlined, size: 22),
+                ),
+                const SizedBox(height: 10),
                 ValueListenableBuilder<bool>(
                   valueListenable: _viewshedOn,
                   builder: (_, on, __) => _RoundButton(
@@ -291,7 +324,7 @@ class _MainScreenState extends State<MainScreen> {
               left: 10,
               bottom: ext * box.maxHeight + 10,
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                // "수원지 1.5 km 외 2곳" — 누르면 목록, 지도에는 1·2·3 파란 점
+                // "수원지 1.5 km 외 2곳" — 누르면 목록, 지도에는 1~5 번호 파란 점
                 ValueListenableBuilder<List<WaterSource>>(
                   valueListenable: widget.analysis.water,
                   builder: (_, ws, __) => ws.isEmpty

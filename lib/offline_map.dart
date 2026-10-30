@@ -271,6 +271,17 @@ Future<String> buildStyle(List<MapPack> packs) async {
   final bands = [for (final p in terrain) ..._bandLayers('t_${p.id}')];
   final contours = [for (final p in terrain) ..._contourLayers('t_${p.id}')];
   final contourLabels = [for (final p in terrain) ..._contourLabelLayers('t_${p.id}')];
+
+  // 건물 이름(아파트 동 번호): 기본 지도에 빠져 있어 labels.yml이 따로 만든 지도
+  final names = [for (final p in packs) if (p.kind == 'labels') p];
+  for (final p in names) {
+    sources['l_${p.id}'] = {
+      'type': 'vector',
+      'url': 'pmtiles://file://${MapStore.instance.fileOf(p.id)}',
+      'attribution': '© OpenStreetMap contributors',
+    };
+  }
+  final nameLayers = [for (final p in names) ..._buildingNameLayers('l_${p.id}')];
   var placed = false;
 
   for (final p in packs.where((p) => p.kind == 'basemap')) {
@@ -286,7 +297,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
         // 고도 색칠은 물 아래(바다·호수가 덮도록), 등고선은 도로 아래, 등고선 숫자는 라벨층
         if (l['id'] == 'water') layers.addAll(bands);
         if (l['id'] == 'roads_tunnels_other_casing') layers.addAll(contours);
-        if (l['id'] == 'address_label') layers.addAll(contourLabels);
+        if (l['id'] == 'address_label') layers.addAll([...contourLabels, ...nameLayers]);
       }
       // 라벨(번지) 바로 앞에 우리 레이어를 끼워 넣어 도로 위, 글자 아래에 그려지게 함
       if (l['id'] == 'address_label') layers.addAll(_extraLayers(s));
@@ -294,7 +305,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
     }
     placed = true;
   }
-  if (!placed) layers.addAll([...bands, ...contours, ...contourLabels]); // 지형만 받은 경우
+  if (!placed) layers.addAll([...bands, ...contours, ...contourLabels, ...nameLayers]); // 기본 지도 없이 받은 경우
   layers.addAll(_meLayers);
 
   return jsonEncode({
@@ -372,6 +383,38 @@ List<Map<String, dynamic>> _contourLabelLayers(String s) => [
       },
     ];
 
+// ---------------- 건물 이름 (labels.yml이 만든 bldg 레이어: name, short, dong) ----------------
+
+const _isDong = ['==', ['get', 'dong'], 1];
+
+/// 확대 15~16은 "101동"만 굵게, 17부터는 "잠실엘스 101동" 전체 이름. 동 번호를 다른 건물 이름보다 먼저 자리 잡게 함
+List<Map<String, dynamic>> _buildingNameLayers(String s) => [
+      {
+        'id': '$s-dong',
+        'type': 'symbol',
+        'source': s,
+        'source-layer': 'bldg',
+        'minzoom': 15,
+        'layout': {
+          'text-field': ['step', ['zoom'], ['get', 'short'], 17, ['get', 'name']],
+          'text-font': ['NotoSansMedium'],
+          'text-size': [
+            'interpolate', ['linear'], ['zoom'], //
+            15, ['case', _isDong, 11.5, 10],
+            18, ['case', _isDong, 15, 12],
+          ],
+          'symbol-sort-key': ['case', _isDong, 0, 1],
+          'text-padding': 1,
+          'text-max-width': 7,
+        },
+        'paint': {
+          'text-color': ['case', _isDong, '#3d2f22', '#6b6258'],
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 1.6,
+        },
+      },
+    ];
+
 /// 기본 스타일은 꽤 확대해야 정보가 보임 -> MAPS.ME처럼 덜 확대해도 보이게 조정
 Map<String, dynamic> _tweak(Map<String, dynamic> l, String id) {
   switch (id) {
@@ -423,21 +466,6 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
           'line-width': ['interpolate', ['linear'], ['zoom'], 12, 0.8, 17, 2.4],
           'line-dasharray': [2, 1.2],
         },
-      },
-      // 건물 이름 (아파트 "201동" 등)
-      {
-        'id': '$s-building-names',
-        'type': 'symbol',
-        'source': s,
-        'source-layer': 'buildings',
-        'minzoom': 15,
-        'filter': ['has', 'name'],
-        'layout': {
-          'text-field': ['coalesce', ['get', 'name:ko'], ['get', 'name']],
-          'text-font': ['NotoSansRegular'],
-          'text-size': 11,
-        },
-        'paint': {'text-color': '#6b6258', 'text-halo-color': '#ffffff', 'text-halo-width': 1},
       },
       // 아파트 단지·학교·공원 등 구역 이름 ("구곡청솔1차아파트")
       {
@@ -596,9 +624,51 @@ class MapControl {
     _ctl?.setGeoJsonSource('track', _track);
     _ctl?.setGeoJsonSource('wpts', _wpts);
     _ctl?.setGeoJsonSource('water', _water);
+    for (final g in layerGroups) {
+      if (hidden.value.contains(g.id)) _applyGroup(g, false);
+    }
   }
 
-  /// 가까운 수원지를 1, 2, 3 번호 붙은 파란 점으로
+  // ---- 레이어 켜고 끄기 (레이어 버튼). 끈 목록은 map_layers.json에 저장 ----
+
+  /// 스타일의 레이어 id 끝부분([suffixes])으로 묶음
+  static const layerGroups = [
+    (id: 'contour', label: '등고선', icon: Icons.terrain_outlined, suffixes: ['-contour', '-contour-label']),
+    (id: 'bands', label: '고도 색칠', icon: Icons.gradient, suffixes: ['-bands']),
+    (id: 'trails', label: '등산로 강조', icon: Icons.hiking, suffixes: ['-trails']),
+    (id: 'pois', label: '장소 아이콘', icon: Icons.place_outlined, suffixes: ['-pois']),
+    (id: 'dong', label: '건물 이름·아파트 동', icon: Icons.apartment, suffixes: ['-dong']),
+    (id: 'water', label: '수원지 번호', icon: Icons.water_drop_outlined, suffixes: ['water-pt', 'water-num']),
+  ];
+
+  final hidden = ValueNotifier<Set<String>>({});
+  List<String> _layerIds = []; // 지금 스타일의 레이어 id (MapPage가 채움)
+
+  MapControl() {
+    _layersFile().then((f) {
+      if (!f.existsSync()) return;
+      try {
+        hidden.value = {for (final v in jsonDecode(f.readAsStringSync()) as List) v as String};
+        if (_ready) _styleLoaded();
+      } catch (_) {}
+    }).catchError((Object _) {});
+  }
+
+  static Future<File> _layersFile() async => File('${(await getApplicationSupportDirectory()).path}/map_layers.json');
+
+  void _applyGroup(({String id, String label, IconData icon, List<String> suffixes}) g, bool shown) {
+    for (final id in _layerIds) {
+      if (g.suffixes.any(id.endsWith)) _ctl?.setLayerVisibility(id, shown);
+    }
+  }
+
+  Future<void> setLayerShown(String group, bool shown) async {
+    hidden.value = shown ? ({...hidden.value}..remove(group)) : {...hidden.value, group};
+    if (_ready) _applyGroup(layerGroups.firstWhere((g) => g.id == group), shown);
+    (await _layersFile()).writeAsStringSync(jsonEncode(hidden.value.toList()));
+  }
+
+  /// 가까운 수원지를 1~5 번호 붙은 파란 점으로
   void setWater(List<({double lat, double lon})> pts) {
     _water = {
       'type': 'FeatureCollection',
@@ -716,6 +786,7 @@ class _MapPageState extends State<MapPage> {
   List<String> _styleIds = [];
   bool? _safeMode; // null = 확인 중, true = 지난번 지도를 보다 앱이 죽음
   bool _marked = false;
+  final _pointers = <int, Offset>{}; // 화면에 닿아 있는 손가락 (끌기 감지)
 
   @override
   void initState() {
@@ -742,6 +813,7 @@ class _MapPageState extends State<MapPage> {
     if (listEquals(ids, _styleIds) && _style != null) return;
     final style = await buildStyle(packs);
     if (!mounted) return;
+    ctl._layerIds = [for (final l in (jsonDecode(style) as Map)['layers'] as List) (l as Map)['id'] as String];
     setState(() {
       _styleIds = ids;
       _style = style;
@@ -791,7 +863,19 @@ class _MapPageState extends State<MapPage> {
           store.markMapOpen(true);
         }
         return Stack(children: [
-          MapLibreMap(
+          // 손가락 하나로 끌면 내 위치 따라가기 해제 (지도 SDK가 손 조작인지 알려주지 않아 직접 감지).
+          // 두 손가락 확대·축소는 따라가기 유지
+          Listener(
+            onPointerDown: (e) => _pointers[e.pointer] = e.position,
+            onPointerMove: (e) {
+              final start = _pointers[e.pointer];
+              if (_pointers.length == 1 && start != null && (e.position - start).distance > 16) {
+                ctl.follow.value = false;
+              }
+            },
+            onPointerUp: (e) => _pointers.remove(e.pointer),
+            onPointerCancel: (e) => _pointers.remove(e.pointer),
+            child: MapLibreMap(
             key: ValueKey(_styleIds.join(',')), // 지도 추가/삭제 시 새 스타일로 다시 생성
             styleString: style,
             initialCameraPosition: _initialCamera(),
@@ -808,7 +892,7 @@ class _MapPageState extends State<MapPage> {
               if (cam != null) _lastCamera = ctl.camera.value = cam;
             },
             onCameraTrackingDismissed: () => ctl.follow.value = false,
-            onMapClick: (_, __) => ctl.follow.value = false,
+            ),
           ),
           // 왼쪽 위: 축척 막대 + 지도 출처 (OpenStreetMap 표시는 필수)
           Positioned(

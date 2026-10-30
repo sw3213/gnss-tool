@@ -53,6 +53,24 @@ void main() {
     expect([for (final l in only['layers'] as List) (l as Map)['id']], contains('t_kr-terrain-contour'));
   });
 
+  test('building names (apartment dong) sit in the label band', () async {
+    const base = MapPack('kr', '대한민국', 'u', '2026-10-29', [124.5, 33, 132, 38.7], 1);
+    const names = MapPack('kr-labels', '건물 이름', 'u', '2026-10-30', [124.5, 33, 132, 38.7], 1, kind: 'labels');
+    final style = jsonDecode(await buildStyle([base, names])) as Map<String, dynamic>;
+    final ids = [for (final l in style['layers'] as List) (l as Map)['id'] as String];
+    expect(ids.indexOf('l_kr-labels-dong'), greaterThan(ids.indexOf('m_kr-roads_highway')));
+    expect(ids.indexOf('l_kr-labels-dong'), lessThan(ids.indexOf('me')));
+    expect((style['sources'] as Map).containsKey('l_kr-labels'), isTrue);
+
+    // 레이어 버튼의 묶음마다 실제 레이어가 하나 이상 걸려야 함
+    const terrain = MapPack('kr-terrain', '지형', 'u', '2026-10-30', [124.5, 33, 132, 38.7], 1, kind: 'terrain');
+    final all = jsonDecode(await buildStyle([base, terrain, names])) as Map<String, dynamic>;
+    final allIds = [for (final l in all['layers'] as List) (l as Map)['id'] as String];
+    for (final g in MapControl.layerGroups) {
+      expect(allIds.where((id) => g.suffixes.any(id.endsWith)), isNotEmpty, reason: g.id);
+    }
+  });
+
   test('scale bar picks a round length that fits', () {
     // 원주(위도 37.3), 확대 15: dp당 약 1.9 m -> 100 dp 안에 100 m
     final mpp = ScaleBar.metersPerDp(37.3, 15);

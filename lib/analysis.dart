@@ -33,7 +33,7 @@ class TerrainAnalysis {
   final slope = ValueNotifier<String?>(null); // "전방 내리막 -5m · -4%"
   final sunToday = ValueNotifier<TerrainSun?>(null);
   TerrainSun? _sunTomorrow;
-  final water = ValueNotifier<List<WaterSource>>([]); // 가까운 수원지 최대 3곳
+  final water = ValueNotifier<List<WaterSource>>([]); // 가까운 수원지 최대 5곳
   final hasDem = ValueNotifier<bool>(false);
 
   DemFile? _dem;
