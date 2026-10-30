@@ -299,10 +299,11 @@ MvtFeature _feature(_Pb f, List<String> keys, List<Object?> values) {
 // ---------------- 가장 가까운 수원지 ----------------
 
 class WaterSource {
-  final String label; // 샘, 계곡, 하천, 식수대 …
+  final String label; // 샘, 계곡, 하천, 식수대 … (긴급이면 소류지, 저수지, 연못 …)
   final String? name;
   final double lat, lon, distanceM;
-  const WaterSource(this.label, this.name, this.lat, this.lon, this.distanceM);
+  final bool emergency; // 고인 물: 물이 정말 급할 때만 (긴급 수원지 포함을 켰을 때)
+  const WaterSource(this.label, this.name, this.lat, this.lon, this.distanceM, {this.emergency = false});
 }
 
 /// 이름으로 걸러낼 고인 물·인공 수로 (OSM에서 호수나 일반 물로 잘못 분류된 경우까지 잡기 위해)
@@ -334,6 +335,29 @@ String? waterLabel(String layer, Map<String, Object?> p) {
   };
 }
 
+/// 긴급 수원지: 평소엔 빼는 고인 물(소류지·저수지·연못·호수). 물이 정말 급할 때 끓이거나 정수해서 마실 마지막 수단.
+/// 기본 수원지([waterLabel])에 해당하면 null. 바다·수영장·분수, 농수로·배수로·운하, 양어장·침사지·유수지는 긴급이어도 제외
+/// (농약·폐수·염분 등 끓여도 없어지지 않는 오염 위험)
+String? emergencyWaterLabel(String layer, Map<String, Object?> p) {
+  if (layer != 'water' || waterLabel(layer, p) != null) return null;
+  final kind = p['kind'] as String?, detail = p['kind_detail'] as String?;
+  if (kind != 'water') return null; // 선(river/stream 외 ditch·drain·canal)과 바다 등
+  final name = (p['name:ko'] ?? p['name']) as String?;
+  if (name != null) {
+    if (const ['양어장', '배수', '농수로', '수로', '침사지', '유수지', '저류지'].any(name.contains)) return null;
+    if (name.contains('소류지')) return '소류지';
+    if (name.contains('저수지')) return '저수지';
+    if (name.contains('연못') || name.endsWith('못')) return '연못';
+  }
+  return switch (detail) {
+    'lake' => '호수·저수지',
+    'reservoir' => '저수지',
+    'pond' || 'basin' => '연못',
+    null => '고인 물',
+    _ => null, // ditch, drain, canal, swimming_pool …
+  };
+}
+
 const _zoom = 14;
 
 (int, int) _tileXY(double lat, double lon) {
@@ -355,7 +379,7 @@ const _zoom = 14;
 double _sinh(double x) => (exp(x) - exp(-x)) / 2;
 
 /// 가까운 수원지 [count]곳. 같은 계곡이 타일마다 조각나 있으므로 이름이 같거나 300 m 안에 붙은 것은 하나로 침
-List<WaterSource> nearestWaters(PmTiles pm, double lat, double lon, {int count = 5, int maxRing = 4}) {
+List<WaterSource> nearestWaters(PmTiles pm, double lat, double lon, {int count = 5, int maxRing = 4, bool emergency = false}) {
   final (cx, cy) = _tileXY(lat, lon);
   final mLat = 111320.0, mLon = 111320.0 * cos(lat * pi / 180);
   final tileM = 40075016.686 * cos(lat * pi / 180) / (1 << _zoom);
@@ -373,7 +397,7 @@ List<WaterSource> nearestWaters(PmTiles pm, double lat, double lon, {int count =
   }
 
   for (var ring = 0; ring <= maxRing; ring++) {
-    _scanRing(pm, cx, cy, ring, lat, lon, mLat, mLon, all.add);
+    _scanRing(pm, cx, cy, ring, lat, lon, mLat, mLon, emergency, all.add);
     // 이번 고리까지 찾은 것보다 다음 고리가 더 가까울 수 없으면 종료 (타일 한 칸 ≈ 2.4 km)
     final got = pick();
     if (got.length == count && got.last.distanceM <= ring * tileM) return got;
@@ -386,7 +410,7 @@ WaterSource? nearestWater(PmTiles pm, double lat, double lon, {int maxRing = 4})
 
 /// 한 고리(가운데 타일에서 ring칸 떨어진 테두리)의 수원지를 찾아 [add]로 넘김 (지물마다 가장 가까운 점 하나)
 void _scanRing(PmTiles pm, int cx, int cy, int ring, double lat, double lon, double mLat, double mLon,
-    void Function(WaterSource) add) {
+    bool emergency, void Function(WaterSource) add) {
   {
     for (var dy = -ring; dy <= ring; dy++) {
       for (var dx = -ring; dx <= ring; dx++) {
@@ -395,7 +419,8 @@ void _scanRing(PmTiles pm, int cx, int cy, int ring, double lat, double lon, dou
         if (bytes == null) continue;
         for (final layer in decodeMvt(bytes, const {'water', 'pois'})) {
           for (final f in layer.features) {
-            final label = waterLabel(layer.name, f.props);
+            final basic = waterLabel(layer.name, f.props);
+            final label = basic ?? (emergency ? emergencyWaterLabel(layer.name, f.props) : null);
             if (label == null) continue;
             final pts = [
               for (final r in f.rings) [for (final p in r) _tileToLatLon(cx + dx, cy + dy, layer.extent, p)]
@@ -435,7 +460,8 @@ void _scanRing(PmTiles pm, int cx, int cy, int ring, double lat, double lon, dou
               bestP = (lat, lon);
             }
             if (bestP != null) {
-              add(WaterSource(label, (f.props['name:ko'] ?? f.props['name']) as String?, bestP!.$1, bestP!.$2, bestD));
+              add(WaterSource(label, (f.props['name:ko'] ?? f.props['name']) as String?, bestP!.$1, bestP!.$2, bestD,
+                  emergency: basic == null));
             }
           }
         }

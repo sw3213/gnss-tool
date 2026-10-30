@@ -36,4 +36,28 @@ void main() {
     expect(waterLabel('water', {'kind': 'water', 'kind_detail': 'lake', 'name': '장성저수지'}), isNull);
     expect(waterLabel('water', {'kind': 'stream', 'name': '남송천'}), '계곡·개울');
   });
+
+  test('emergency water: stagnant ponds only when asked, never polluted kinds', () {
+    Map<String, Object?> pond([String? name, String? detail = 'lake']) =>
+        {'kind': 'water', 'kind_detail': detail, if (name != null) 'name': name};
+    // 기본 수원지에서 빠지는 고인 물이 긴급에서는 종류를 붙여 나옴
+    expect(emergencyWaterLabel('water', pond()), '호수·저수지'); // 이름 없는 소류지가 이렇게 들어옴
+    expect(emergencyWaterLabel('water', pond('의남송소류지')), '소류지');
+    expect(emergencyWaterLabel('water', pond('장성저수지')), '저수지');
+    expect(emergencyWaterLabel('water', pond('용못')), '연못');
+    expect(emergencyWaterLabel('water', pond(null, null)), '고인 물');
+    // 끓여도 없어지지 않는 오염 위험은 긴급이어도 제외
+    for (final bad in [
+      pond('OO양어장'),
+      pond('OO침사지'),
+      {'kind': 'ocean'},
+      {'kind': 'swimming_pool'},
+      {'kind': 'ditch'},
+      {'kind': 'water', 'kind_detail': 'drain'},
+    ]) {
+      expect(emergencyWaterLabel('water', bad), isNull, reason: '$bad');
+    }
+    // 흐르는 물은 기본 수원지라 긴급 쪽에는 안 나옴
+    expect(emergencyWaterLabel('water', {'kind': 'stream'}), isNull);
+  });
 }

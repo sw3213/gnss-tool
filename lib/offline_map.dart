@@ -557,7 +557,7 @@ const _meLayers = [
     'source': 'water',
     'paint': {
       'circle-radius': 9,
-      'circle-color': '#1c7ed6',
+      'circle-color': ['case', ['get', 'e'], '#e8590c', '#1c7ed6'], // 긴급 수원지는 주황
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 2,
     },
@@ -695,8 +695,8 @@ class MapControl {
     (await _layersFile()).writeAsStringSync(jsonEncode(hidden.value.toList()));
   }
 
-  /// 가까운 수원지를 1~5 번호 붙은 파란 점으로
-  void setWater(List<({double lat, double lon})> pts) {
+  /// 가까운 수원지를 1~5 번호 붙은 점으로 (기본 파랑, 긴급 주황)
+  void setWater(List<({double lat, double lon, bool emergency})> pts) {
     _water = {
       'type': 'FeatureCollection',
       'features': [
@@ -704,7 +704,7 @@ class MapControl {
           {
             'type': 'Feature',
             'geometry': {'type': 'Point', 'coordinates': [pts[i].lon, pts[i].lat]},
-            'properties': {'n': '${i + 1}'},
+            'properties': {'n': '${i + 1}', 'e': pts[i].emergency},
           }
       ],
     };

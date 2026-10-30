@@ -61,6 +61,7 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
+const _waterColor = Color(0xFF1C7ED6), _emergencyColor = Color(0xFFE8590C); // 수원지 번호: 기본 파랑, 긴급 주황
 const _panelMin = 0.13, _panelInit = 0.24, _panelMax = 0.62;
 
 class _MainScreenState extends State<MainScreen> {
@@ -76,38 +77,66 @@ class _MainScreenState extends State<MainScreen> {
         ),
       ));
 
-  void _showWater(List<WaterSource> ws) {
-    final s = widget.snap.value;
+  void _showWater() {
+    final a = widget.analysis;
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true, // 5곳이면 화면 절반을 넘을 수 있음
       builder: (ctx) => SafeArea(
         child: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const ListTile(
-            title: Text('가까운 수원지', style: TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: Text('흐르는 물·샘·식수대만 (호수·소류지·저수지·연못·농수로 제외). 마시기 전 반드시 끓이거나 정수하세요'),
-          ),
-          for (var i = 0; i < ws.length; i++)
-            ListTile(
-              leading: CircleAvatar(
-                radius: 14,
-                backgroundColor: const Color(0xFF1C7ED6),
-                child: Text('${i + 1}', style: const TextStyle(color: Colors.white, fontSize: 13)),
-              ),
-              title: Text('${ws[i].label}${ws[i].name == null ? '' : ' · ${ws[i].name}'}'),
-              subtitle: Text(s.lat == null
-                  ? distanceLabel(ws[i].distanceM)
-                  : '${distanceLabel(ws[i].distanceM)}  ·  '
-                      '${directionLabel(bearingDeg(s.lat!, s.lon!, ws[i].lat, ws[i].lon))}'),
-              trailing: const Icon(Icons.map_outlined),
-              onTap: () {
-                Navigator.pop(ctx);
-                widget.map.recenter(ws[i].lat, ws[i].lon);
-                widget.map.follow.value = false;
+          child: ValueListenableBuilder<bool>(
+            valueListenable: a.emergencyWater,
+            builder: (_, emergency, __) => ValueListenableBuilder<List<WaterSource>>(
+              valueListenable: a.water,
+              builder: (_, ws, __) {
+                final s = widget.snap.value;
+                return Column(mainAxisSize: MainAxisSize.min, children: [
+                  ListTile(
+                    title: const Text('가까운 수원지', style: TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text(emergency
+                        ? '기본 수원지 + 긴급 수원지(소류지·저수지·연못 등 고인 물). 마시기 전 반드시 끓이거나 정수하세요'
+                        : '기본 수원지: 흐르는 물·샘·식수대만. 마시기 전 반드시 끓이거나 정수하세요'),
+                  ),
+                  // 물이 정말 급할 때만 켬: 고인 물까지 거리 계산에 넣음 (설정은 저장됨)
+                  SwitchListTile(
+                    secondary: Icon(Icons.warning_amber_rounded, color: emergency ? Colors.orange : null),
+                    title: const Text('긴급 수원지 포함'),
+                    subtitle: const Text('소류지·저수지·연못·호수도 찾기 (오염 위험, 최후의 수단)'),
+                    value: emergency,
+                    activeThumbColor: Colors.orange,
+                    onChanged: a.setEmergencyWater,
+                  ),
+                  if (ws.isEmpty)
+                    const ListTile(title: Text('주변 10 km 안에 찾은 수원지가 없습니다')),
+                  for (var i = 0; i < ws.length; i++)
+                    ListTile(
+                      leading: CircleAvatar(
+                        radius: 14,
+                        backgroundColor: ws[i].emergency ? _emergencyColor : _waterColor,
+                        child: Text('${i + 1}', style: const TextStyle(color: Colors.white, fontSize: 13)),
+                      ),
+                      title: Text.rich(TextSpan(children: [
+                        if (ws[i].emergency)
+                          const TextSpan(
+                              text: '긴급  ', style: TextStyle(color: _emergencyColor, fontWeight: FontWeight.bold)),
+                        TextSpan(text: '${ws[i].label}${ws[i].name == null ? '' : ' · ${ws[i].name}'}'),
+                      ])),
+                      subtitle: Text(s.lat == null
+                          ? distanceLabel(ws[i].distanceM)
+                          : '${distanceLabel(ws[i].distanceM)}  ·  '
+                              '${directionLabel(bearingDeg(s.lat!, s.lon!, ws[i].lat, ws[i].lon))}'),
+                      trailing: const Icon(Icons.map_outlined),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        widget.map.recenter(ws[i].lat, ws[i].lon);
+                        widget.map.follow.value = false;
+                      },
+                    ),
+                ]);
               },
             ),
-        ])),
+          ),
+        ),
       ),
     );
   }
@@ -324,7 +353,7 @@ class _MainScreenState extends State<MainScreen> {
               left: 10,
               bottom: ext * box.maxHeight + 10,
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                // "수원지 1.5 km 외 2곳" — 누르면 목록, 지도에는 1~5 번호 파란 점
+                // "수원지 1.5 km 외 2곳" — 누르면 목록, 지도에는 1~5 번호 점 (기본 파랑, 긴급 주황)
                 ValueListenableBuilder<List<WaterSource>>(
                   valueListenable: widget.analysis.water,
                   builder: (_, ws, __) => ws.isEmpty
@@ -332,8 +361,10 @@ class _MainScreenState extends State<MainScreen> {
                       : Padding(
                           padding: const EdgeInsets.only(bottom: 8),
                           child: GestureDetector(
-                            onTap: () => _showWater(ws),
-                            child: _MapChip(icon: Icons.water_drop_outlined, text: waterChipLabel(ws)),
+                            onTap: _showWater,
+                            child: _MapChip(
+                                icon: ws.any((w) => w.emergency) ? Icons.warning_amber_rounded : Icons.water_drop_outlined,
+                                text: waterChipLabel(ws)),
                           ),
                         ),
                 ),

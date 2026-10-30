@@ -508,7 +508,7 @@ class _HomePageState extends State<HomePage> {
     track.points.addListener(() => mapControl.setTrack(track.points.value));
     waypoints.items.addListener(() => mapControl.setWaypoints(waypoints.items.value));
     analysis.water.addListener(() =>
-        mapControl.setWater([for (final w in analysis.water.value) (lat: w.lat, lon: w.lon)]));
+        mapControl.setWater([for (final w in analysis.water.value) (lat: w.lat, lon: w.lon, emergency: w.emergency)]));
     waypoints.load();
     if (isAndroid) analysis.start(); // 고도 데이터·지도 파일은 안드로이드에서만 받음
     if (isAndroid) {

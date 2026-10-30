@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'main.dart' show GnssSnapshot;
 import 'nav.dart';
@@ -16,10 +18,10 @@ import 'water.dart';
 // ============================================================
 
 /// 별도 스레드에서 실행 (최상위 함수라 넘기는 값이 문자열·숫자뿐)
-List<WaterSource> _findWater((String, double, double) a) {
+List<WaterSource> _findWater((String, double, double, bool) a) {
   final pm = PmTiles.open(a.$1);
   try {
-    return nearestWaters(pm, a.$2, a.$3);
+    return nearestWaters(pm, a.$2, a.$3, emergency: a.$4);
   } finally {
     pm.close();
   }
@@ -34,6 +36,8 @@ class TerrainAnalysis {
   final sunToday = ValueNotifier<TerrainSun?>(null);
   TerrainSun? _sunTomorrow;
   final water = ValueNotifier<List<WaterSource>>([]); // 가까운 수원지 최대 5곳
+  /// 긴급 수원지 포함: 켜면 소류지·저수지·연못 같은 고인 물도 거리 계산에 넣음 (설정은 water_mode.json에 저장)
+  final emergencyWater = ValueNotifier<bool>(false);
   final hasDem = ValueNotifier<bool>(false);
 
   DemFile? _dem;
@@ -42,12 +46,16 @@ class TerrainAnalysis {
   DateTime _slopeAt = DateTime(0);
   (double, double, DateTime)? _sunFor, _waterFor;
   bool _waterBusy = false;
+  bool _waterAgain = false; // 계산 중에 긴급 설정이 바뀌면 끝나고 한 번 더
 
   void start() {
     MapStore.instance.installed.addListener(_files);
     snap.addListener(_onMove);
     heading.addListener(_onMove);
     _timer = Timer.periodic(const Duration(seconds: 15), (_) => _periodic());
+    _modeFile().then((f) {
+      if (f.existsSync() && f.readAsStringSync().trim() == 'emergency') setEmergencyWater(true); // 첫 검색이 먼저 돌았어도 다시 찾음
+    }).catchError((Object _) {});
     _files();
   }
 
@@ -57,6 +65,20 @@ class TerrainAnalysis {
     heading.removeListener(_onMove);
     _timer?.cancel();
     _dem?.close();
+  }
+
+  static Future<File> _modeFile() async => File('${(await getApplicationSupportDirectory()).path}/water_mode.json');
+
+  Future<void> setEmergencyWater(bool on) async {
+    emergencyWater.value = on;
+    water.value = on ? water.value : [for (final w in water.value) if (!w.emergency) w]; // 끌 때는 바로 빼 줌
+    _waterFor = null;
+    if (_waterBusy) {
+      _waterAgain = true;
+    } else {
+      _periodic();
+    }
+    (await _modeFile()).writeAsStringSync(on ? 'emergency' : 'basic');
   }
 
   (double, double)? get _pos {
@@ -126,9 +148,16 @@ class TerrainAnalysis {
     if (mapPath != null && !_waterBusy && _stale(_waterFor, lat, lon, 100, const Duration(minutes: 3))) {
       _waterBusy = true;
       _waterFor = (lat, lon, now);
-      compute(_findWater, (mapPath, lat, lon))
+      compute(_findWater, (mapPath, lat, lon, emergencyWater.value))
           .then((w) => water.value = w, onError: (Object _) {})
-          .whenComplete(() => _waterBusy = false);
+          .whenComplete(() {
+        _waterBusy = false;
+        if (_waterAgain) {
+          _waterAgain = false;
+          _waterFor = null;
+          _periodic();
+        }
+      });
     }
   }
 
