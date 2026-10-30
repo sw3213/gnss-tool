@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:maplibre_gl/maplibre_gl.dart' show CameraPosition;
 import 'package:path_provider/path_provider.dart';
 
@@ -35,9 +36,11 @@ class MainScreen extends StatefulWidget {
   final void Function(DataSource) onSource;
   final VoidCallback onRetrySource, onDismissAlert;
   final TerrainAnalysis analysis;
+  final Guide guide;
 
   const MainScreen({
     required this.analysis,
+    required this.guide,
     super.key,
     required this.snap,
     required this.sensors,
@@ -67,6 +70,81 @@ const _panelMin = 0.13, _panelInit = 0.24, _panelMax = 0.62;
 class _MainScreenState extends State<MainScreen> {
   final _sheet = ValueNotifier<double>(_panelInit); // 아래 패널이 화면에서 차지하는 비율
   final _viewshedOn = ValueNotifier<bool>(false);
+  NavTarget? _arrivedAt; // 도착 알림을 이미 띄운 목표 (한 번만)
+
+  @override
+  void initState() {
+    super.initState();
+    widget.map.onLongPress = _onLongPress;
+    widget.guide.info.addListener(_checkArrival);
+  }
+
+  @override
+  void dispose() {
+    widget.map.onLongPress = null;
+    widget.guide.info.removeListener(_checkArrival);
+    super.dispose();
+  }
+
+  void _checkArrival() {
+    final i = widget.guide.info.value, t = widget.guide.target.value;
+    if (i == null || t == null || !i.arrived || identical(_arrivedAt, t)) return;
+    _arrivedAt = t;
+    HapticFeedback.heavyImpact();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('"${t.name}"에 도착했습니다'),
+      duration: const Duration(seconds: 10),
+      action: SnackBarAction(label: '안내 종료', onPressed: widget.guide.stop),
+    ));
+  }
+
+  void _guideTo(NavTarget t) {
+    widget.guide.start(t);
+    final s = widget.snap.value;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(s.lat == null
+          ? '"${t.name}" 안내를 시작합니다'
+          : '"${t.name}" 안내 시작: ${distanceLabel(distanceM(s.lat!, s.lon!, t.lat, t.lon))}'),
+    ));
+  }
+
+  /// 지도를 길게 누른 곳: 거리·고도를 보여 주고 "여기로 안내" / "지점으로 저장"
+  void _onLongPress(double lat, double lon) {
+    final s = widget.snap.value;
+    final elev = widget.analysis.elevationAt(lat, lon);
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.push_pin_outlined, color: Colors.redAccent),
+            title: Text(s.lat == null
+                ? '선택한 곳'
+                : '${distanceLabel(distanceM(s.lat!, s.lon!, lat, lon))}  ·  '
+                    '${directionLabel(bearingDeg(s.lat!, s.lon!, lat, lon))}'),
+            subtitle: Text('${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}'
+                '${elev == null ? '' : '  ·  고도 ${elev.round()} m'}'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.flag_outlined),
+            title: const Text('여기로 안내'),
+            onTap: () {
+              Navigator.pop(ctx);
+              _guideTo(NavTarget('선택한 곳', lat, lon));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.add_location_alt_outlined),
+            title: const Text('지점으로 저장'),
+            onTap: () {
+              Navigator.pop(ctx);
+              _saveWaypoint(at: (lat, lon, elev));
+            },
+          ),
+        ]),
+      ),
+    );
+  }
 
   void _needDem() => ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: const Text('지형 분석에는 "대한민국 고도 데이터 (분석용)"이 필요합니다'),
@@ -125,7 +203,14 @@ class _MainScreenState extends State<MainScreen> {
                           ? distanceLabel(ws[i].distanceM)
                           : '${distanceLabel(ws[i].distanceM)}  ·  '
                               '${directionLabel(bearingDeg(s.lat!, s.lon!, ws[i].lat, ws[i].lon))}'),
-                      trailing: const Icon(Icons.map_outlined),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.flag_outlined),
+                        tooltip: '여기로 안내',
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _guideTo(NavTarget('${ws[i].emergency ? '긴급 ' : ''}${ws[i].name ?? ws[i].label}', ws[i].lat, ws[i].lon));
+                        },
+                      ),
                       onTap: () {
                         Navigator.pop(ctx);
                         widget.map.recenter(ws[i].lat, ws[i].lon);
@@ -207,10 +292,11 @@ class _MainScreenState extends State<MainScreen> {
     ));
   }
 
-  Future<void> _saveWaypoint() async {
+  /// 현재 위치(또는 지도에서 길게 누른 곳 [at]: 위도, 경도, 고도)를 이름 붙여 저장
+  Future<void> _saveWaypoint({(double, double, double?)? at}) async {
     final s = widget.snap.value;
     final messenger = ScaffoldMessenger.of(context);
-    if (s.lat == null || s.lon == null) {
+    if (at == null && (s.lat == null || s.lon == null)) {
       messenger.showSnackBar(const SnackBar(content: Text('현재 위치가 없어 저장할 수 없습니다 (GPS 측위 대기)')));
       return;
     }
@@ -232,7 +318,7 @@ class _MainScreenState extends State<MainScreen> {
       ),
     );
     if (name == null || name.trim().isEmpty) return;
-    await widget.waypoints.add(Waypoint(name.trim(), s.lat!, s.lon!, s.alt, DateTime.now()));
+    await widget.waypoints.add(Waypoint(name.trim(), at?.$1 ?? s.lat!, at?.$2 ?? s.lon!, at == null ? s.alt : at.$3, DateTime.now()));
     messenger.showSnackBar(SnackBar(content: Text('"${name.trim()}" 저장했습니다')));
   }
 
@@ -244,6 +330,7 @@ class _MainScreenState extends State<MainScreen> {
           qnhHistory: widget.qnhHistory,
           log: widget.log,
           waypoints: widget.waypoints,
+          onGuide: _guideTo,
           map: widget.map,
           source: widget.source,
           onSource: widget.onSource,
@@ -398,6 +485,8 @@ class _MainScreenState extends State<MainScreen> {
               maxChildSize: _panelMax,
               builder: (_, scroll) => _InfoPanel(
                 scroll: scroll,
+                guide: widget.guide,
+                analysis: widget.analysis,
                 snap: widget.snap,
                 sensors: widget.sensors,
                 weather: widget.weather,
@@ -588,12 +677,16 @@ class _MapChip extends StatelessWidget {
 
 class _InfoPanel extends StatelessWidget {
   final ScrollController scroll;
+  final Guide guide;
+  final TerrainAnalysis analysis;
   final ValueListenable<GnssSnapshot> snap;
   final ValueListenable<List<SensorSample>> sensors;
   final ValueListenable<StormStatus> weather;
   final TrackRecorder track;
   const _InfoPanel({
     required this.scroll,
+    required this.guide,
+    required this.analysis,
     required this.snap,
     required this.sensors,
     required this.weather,
@@ -615,6 +708,7 @@ class _InfoPanel extends StatelessWidget {
             decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
           ),
         ),
+        _GuideCard(guide: guide, analysis: analysis),
         Row(children: [
           Expanded(
             child: ValueListenableBuilder<GnssSnapshot>(
@@ -817,11 +911,13 @@ class ToolsPage extends StatelessWidget {
   final ValueListenable<StormStatus> weather;
   final ValueListenable<List<(DateTime, double)>> qnhHistory;
   final ValueListenable<List<String>> log;
+  final void Function(NavTarget) onGuide;
   final WaypointStore waypoints;
   final MapControl map;
   final DataSource source;
   final void Function(DataSource) onSource;
   const ToolsPage({
+    required this.onGuide,
     super.key,
     required this.snap,
     required this.sensors,
@@ -847,7 +943,7 @@ class ToolsPage extends StatelessWidget {
       tile(Icons.show_chart, '센서 그래프', '해면기압 추세, 기압·온도·습도·고도',
           () => open(SensorPage(data: sensors, weather: weather, qnhHistory: qnhHistory), '센서 그래프')),
       tile(Icons.place_outlined, '저장한 지점', '거리·방위 보기, 지도에서 찾기',
-          () => open(WaypointsPage(waypoints: waypoints, snap: snap, map: map), '저장한 지점')),
+          () => open(WaypointsPage(waypoints: waypoints, snap: snap, map: map, onGuide: onGuide), '저장한 지점')),
       tile(Icons.route, '이동 기록 파일', '저장된 GPX 파일', () => open(const TracksPage(), '이동 기록 파일')),
       tile(Icons.terminal, 'NMEA 로그', '수신기 원시 문장', () => open(LogPage(log: log), 'NMEA 로그')),
       const Divider(),
@@ -864,7 +960,9 @@ class WaypointsPage extends StatelessWidget {
   final WaypointStore waypoints;
   final ValueListenable<GnssSnapshot> snap;
   final MapControl map;
-  const WaypointsPage({super.key, required this.waypoints, required this.snap, required this.map});
+  final void Function(NavTarget) onGuide;
+  const WaypointsPage(
+      {super.key, required this.waypoints, required this.snap, required this.map, required this.onGuide});
 
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<List<Waypoint>>(
@@ -888,11 +986,21 @@ class WaypointsPage extends StatelessWidget {
                         map.follow.value = false;
                         Navigator.of(context).popUntil((r) => r.isFirst);
                       },
-                      trailing: IconButton(
-                        icon: const Icon(Icons.delete_outline),
-                        tooltip: '삭제',
-                        onPressed: () => waypoints.remove(w),
-                      ),
+                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                        IconButton(
+                          icon: const Icon(Icons.flag_outlined),
+                          tooltip: '여기로 안내',
+                          onPressed: () {
+                            onGuide(NavTarget(w.name, w.lat, w.lon));
+                            Navigator.of(context).popUntil((r) => r.isFirst);
+                          },
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline),
+                          tooltip: '삭제',
+                          onPressed: () => waypoints.remove(w),
+                        ),
+                      ]),
                     ),
                 ]),
               ),
@@ -995,4 +1103,79 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     ]);
   }
+}
+
+// ---------------- 목표 지점 안내 카드 (아래 패널 맨 위) ----------------
+
+/// 목표까지 직선 거리·방향 화살표·걷는 시간·고도 차이·목표 방향 경사. 안내 중이 아니면 아무것도 안 그림
+class _GuideCard extends StatelessWidget {
+  final Guide guide;
+  final TerrainAnalysis analysis;
+  const _GuideCard({required this.guide, required this.analysis});
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<NavTarget?>(
+        valueListenable: guide.target,
+        builder: (_, t, __) => t == null
+            ? const SizedBox.shrink()
+            : ValueListenableBuilder<GuideInfo?>(
+                valueListenable: guide.info,
+                builder: (_, i, __) {
+                  const sub = TextStyle(fontSize: 12, color: Colors.white70);
+                  final slope = i == null ? null : analysis.slopeToward(i.bearing);
+                  final climb = i?.climb;
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.fromLTRB(12, 10, 4, 10),
+                    decoration: BoxDecoration(
+                      color: i?.arrived == true ? const Color(0xFF1F3B2A) : const Color(0xFF2A1E1E),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: i?.arrived == true ? Colors.greenAccent : Colors.redAccent, width: 1),
+                    ),
+                    child: Row(children: [
+                      // 화살표: 나침반이 있으면 폰이 향한 방향 기준(위 = 정면), 없으면 북쪽 기준
+                      Transform.rotate(
+                        angle: ((i?.turn ?? i?.bearing ?? 0) * math.pi / 180),
+                        child: Icon(i?.arrived == true ? Icons.flag : Icons.navigation,
+                            size: 40, color: i?.arrived == true ? Colors.greenAccent : Colors.redAccent),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(t.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                          Text(
+                            i == null
+                                ? '현재 위치를 기다리는 중'
+                                : i.arrived
+                                    ? '도착 (${distanceLabel(i.distance)})'
+                                    : '${distanceLabel(i.distance)}  ·  '
+                                        '${i.turn == null ? directionLabel(i.bearing) : turnLabel(i.turn!)}',
+                            style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+                          ),
+                          if (i != null && !i.arrived)
+                            Text(
+                              [
+                                if (i.turn != null) '방위 ${directionLabel(i.bearing)}',
+                                '걸어서 약 ${durationLabel(i.walk)}',
+                                if (climb != null && climb.abs() >= 10)
+                                  '목표가 ${climb.abs().round()} m ${climb > 0 ? '높음' : '낮음'}',
+                              ].join('  ·  '),
+                              style: sub,
+                            ),
+                          if (slope != null && i != null && !i.arrived) Text('목표 방향 $slope', style: sub),
+                        ]),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close),
+                        tooltip: '안내 종료',
+                        onPressed: guide.stop,
+                      ),
+                    ]),
+                  );
+                },
+              ),
+      );
 }

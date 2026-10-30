@@ -201,3 +201,90 @@ String? sunCountdown(DateTime now, double lat, double lon) {
   final tomorrow = sunTimes(now.add(const Duration(days: 1)), lat, lon).rise;
   return tomorrow == null ? null : '일출까지 ${durationLabel(tomorrow.difference(now))}';
 }
+
+// ---------------- 목표 지점 안내 ----------------
+// 저장한 지점·수원지·지도에서 길게 누른 곳을 목표로 정하면 거리·방향·걷는 시간을 계속 알려 줌 (직선 기준)
+
+class NavTarget {
+  final String name;
+  final double lat, lon;
+  const NavTarget(this.name, this.lat, this.lon);
+
+  Map<String, dynamic> toJson() => {'name': name, 'lat': lat, 'lon': lon};
+  factory NavTarget.fromJson(Map<String, dynamic> j) =>
+      NavTarget(j['name'] as String, (j['lat'] as num).toDouble(), (j['lon'] as num).toDouble());
+}
+
+class GuideInfo {
+  final double distance, bearing;
+  final double? turn; // 폰이 향한 방향 기준 상대 각도 (-180 왼쪽 ~ +180 오른쪽), 나침반 없으면 null
+  final double? climb; // 목표 고도 - 현재 고도 (m), 고도 데이터 없으면 null
+  final Duration walk;
+  final bool arrived;
+  const GuideInfo(this.distance, this.bearing, this.turn, this.climb, this.walk, this.arrived);
+}
+
+/// 상대 각도 -> "정면", "오른쪽 40°", "왼쪽 90°", "뒤쪽"
+String turnLabel(double rel) {
+  final a = rel.abs().round();
+  if (a < 15) return '정면';
+  if (a > 150) return '뒤쪽';
+  return rel < 0 ? '왼쪽 $a°' : '오른쪽 $a°';
+}
+
+/// 걷는 시간 어림 (등산 지도 계산법): 평지 시속 4 km + 오르막 600 m마다 1시간 더
+Duration walkTime(double distM, double? climbM) {
+  final h = distM / 4000 + max(0.0, climbM ?? 0) / 600;
+  return Duration(minutes: (h * 60).round());
+}
+
+/// 도착 판정 거리: 20 m, GPS 오차가 크면 그만큼 넓힘 (최대 50 m)
+double arriveRadius(double? hAcc) => min(50.0, max(20.0, hAcc ?? 0));
+
+GuideInfo guideInfo(double lat, double lon, double? hAcc, NavTarget t, double? heading,
+    {double? hereElev, double? targetElev}) {
+  final d = distanceM(lat, lon, t.lat, t.lon);
+  final b = bearingDeg(lat, lon, t.lat, t.lon);
+  final turn = heading == null ? null : (b - heading + 540) % 360 - 180;
+  final climb = hereElev == null || targetElev == null ? null : targetElev - hereElev;
+  return GuideInfo(d, b, turn, climb, walkTime(d, climb), d <= arriveRadius(hAcc));
+}
+
+/// 지금 안내 중인 목표 (앱을 다시 켜도 이어서 안내: documents/guide/target.json)
+class Guide {
+  final target = ValueNotifier<NavTarget?>(null);
+  final info = ValueNotifier<GuideInfo?>(null);
+
+  Future<File> _file() async => File('${(await _dataDir('guide')).path}/target.json');
+
+  Future<void> load() async {
+    try {
+      final f = await _file();
+      if (f.existsSync()) target.value = NavTarget.fromJson(jsonDecode(await f.readAsString()) as Map<String, dynamic>);
+    } catch (_) {}
+  }
+
+  Future<void> start(NavTarget t) async {
+    target.value = t;
+    info.value = null;
+    await (await _file()).writeAsString(jsonEncode(t.toJson()));
+  }
+
+  Future<void> stop() async {
+    target.value = null;
+    info.value = null;
+    final f = await _file();
+    if (f.existsSync()) f.deleteSync();
+  }
+
+  /// 위치나 방위가 바뀔 때마다 호출. [elevation]은 고도 데이터로 고도를 구하는 함수 (없으면 null)
+  void update(double? lat, double? lon, double? hAcc, double? heading, double? Function(double, double)? elevation) {
+    final t = target.value;
+    if (t == null || lat == null || lon == null) {
+      info.value = null;
+      return;
+    }
+    info.value = guideInfo(lat, lon, hAcc, t, heading,
+        hereElev: elevation?.call(lat, lon), targetElev: elevation?.call(t.lat, t.lon));
+  }
+}

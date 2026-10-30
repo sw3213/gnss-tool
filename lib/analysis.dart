@@ -161,6 +161,17 @@ class TerrainAnalysis {
     }
   }
 
+  /// 고도 데이터의 지면 고도 (m). 고도 데이터가 없으면 null
+  double? elevationAt(double lat, double lon) => _dem?.elevation(lat, lon);
+
+  /// 목표 방향으로 100 m 앞 경사 ("오르막 +8m · 8%"). 고도 데이터·위치가 없으면 null
+  String? slopeToward(double bearing) {
+    final dem = _dem, p = _pos;
+    if (dem == null || p == null) return null;
+    final s = forwardSlope(dem, p.$1, p.$2, bearing);
+    return s == null ? null : slopeLabel(s).replaceFirst('전방 ', '');
+  }
+
   /// "일출까지 7시간 31분" — 고도 데이터가 있으면 산 능선을 반영한 시각
   String? sunChip(DateTime now) {
     final p = _pos;

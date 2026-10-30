@@ -36,4 +36,29 @@ void main() {
     final gpx = TrackRecorder.toGpx('t', [TrackPoint(37, 127, 100, DateTime.utc(2026))]);
     expect(gpx, contains('<trkpt lat="37.0000000" lon="127.0000000"><ele>100.0</ele>'));
   });
+
+  test('target guidance: distance, turn, walking time, arrival', () {
+    // 원주 단구동에서 북동쪽 약 1.4 km 지점
+    const t = NavTarget('목표', 37.33, 127.945);
+    final i = guideInfo(37.32, 127.935, 5, t, 0, hereElev: 180, targetElev: 300);
+    expect(i.distance, closeTo(1417, 20));
+    expect(i.bearing, closeTo(39, 2));
+    expect(i.turn, closeTo(38.4, 1)); // 북쪽을 보고 있으면 오른쪽 38°
+    expect(turnLabel(i.turn!), '오른쪽 38°');
+    expect(i.climb, 120);
+    // 1.42 km / 4 km/h ≈ 21분 + 120 m 오르막 / 600 m/h = 12분
+    expect(i.walk.inMinutes, closeTo(33, 1));
+    expect(i.arrived, isFalse);
+
+    // 반대 방향을 보고 있으면 뒤쪽, 나침반 없으면 turn 없음
+    expect(turnLabel(guideInfo(37.32, 127.935, 5, t, 220).turn!), '뒤쪽');
+    expect(turnLabel(-90), '왼쪽 90°');
+    expect(turnLabel(8), '정면');
+    expect(guideInfo(37.32, 127.935, 5, t, null).turn, isNull);
+
+    // 15 m 앞이면 도착, GPS 오차가 40 m면 35 m 앞도 도착으로 침
+    expect(guideInfo(37.32, 127.935, 5, const NavTarget('a', 37.32013, 127.935), null).arrived, isTrue);
+    expect(guideInfo(37.32, 127.935, 5, const NavTarget('a', 37.32032, 127.935), null).arrived, isFalse);
+    expect(guideInfo(37.32, 127.935, 40, const NavTarget('a', 37.32032, 127.935), null).arrived, isTrue);
+  });
 }

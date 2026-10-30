@@ -493,6 +493,7 @@ class _HomePageState extends State<HomePage> {
   final track = TrackRecorder();
   final waypoints = WaypointStore();
   final mapControl = MapControl();
+  final guide = Guide(); // 목표 지점 안내
   final heading = ValueNotifier<double?>(null); // 폰이 향한 방위 (진북 기준)
   StreamSubscription<dynamic>? _headingSub;
   late final analysis = TerrainAnalysis(snap: parser.notifier, heading: heading);
@@ -510,11 +511,17 @@ class _HomePageState extends State<HomePage> {
     analysis.water.addListener(() =>
         mapControl.setWater([for (final w in analysis.water.value) (lat: w.lat, lon: w.lon, emergency: w.emergency)]));
     waypoints.load();
+    guide.target.addListener(() {
+      mapControl.setTarget(guide.target.value);
+      _updateGuide();
+    });
+    guide.load();
     if (isAndroid) analysis.start(); // 고도 데이터·지도 파일은 안드로이드에서만 받음
     if (isAndroid) {
       _headingSub = const EventChannel('gnss_tool/heading').receiveBroadcastStream().listen((d) {
         heading.value = (d as num).toDouble();
         mapControl.onHeading(heading.value!);
+        _updateGuide();
       }, onError: (Object _) {}); // 방향 센서 없는 폰: 방위 표시만 안 함
     }
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -527,6 +534,14 @@ class _HomePageState extends State<HomePage> {
   void _onPosition() {
     final s = parser.notifier.value;
     if (s.lat != null && s.lon != null && s.fixQ > 0) track.add(s.lat!, s.lon!, s.alt, s.hAcc);
+    _updateGuide();
+  }
+
+  void _updateGuide() {
+    if (guide.target.value == null) return;
+    final s = parser.notifier.value;
+    final ok = s.fixQ > 0;
+    guide.update(ok ? s.lat : null, ok ? s.lon : null, s.hAcc, heading.value, analysis.elevationAt);
   }
 
   // 위치 출처 선택은 앱을 다시 켜도 유지
@@ -716,6 +731,7 @@ class _HomePageState extends State<HomePage> {
       heading: heading,
       sourceLabel: sourceLabels[source]!,
       map: mapControl,
+      guide: guide,
       track: track,
       waypoints: waypoints,
       source: source,

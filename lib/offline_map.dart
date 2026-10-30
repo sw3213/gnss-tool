@@ -252,7 +252,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
 
   const empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
   final sources = <String, dynamic>{
-    for (final id in ['me', 'track', 'wpts', 'water']) id: {'type': 'geojson', 'data': empty},
+    for (final id in ['me', 'track', 'wpts', 'water', 'target']) id: {'type': 'geojson', 'data': empty},
   };
   final layers = <Map<String, dynamic>>[
     for (final l in base)
@@ -581,6 +581,42 @@ const _meLayers = [
     'layout': {'line-cap': 'round', 'line-join': 'round'},
     'paint': {'line-color': '#f76707', 'line-width': 4, 'line-opacity': 0.9},
   },
+  // 목표 지점 안내: 내 위치 -> 목표 빨간 점선 + 깃발 점·이름
+  {
+    'id': 'target-line',
+    'type': 'line',
+    'source': 'target',
+    'filter': ['==', ['geometry-type'], 'LineString'],
+    'layout': {'line-cap': 'round'},
+    'paint': {'line-color': '#e03131', 'line-width': 3, 'line-dasharray': [1.5, 1.5], 'line-opacity': 0.85},
+  },
+  {
+    'id': 'target-pt',
+    'type': 'circle',
+    'source': 'target',
+    'filter': ['==', ['geometry-type'], 'Point'],
+    'paint': {
+      'circle-radius': 8,
+      'circle-color': '#e03131',
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 3,
+    },
+  },
+  {
+    'id': 'target-label',
+    'type': 'symbol',
+    'source': 'target',
+    'filter': ['==', ['geometry-type'], 'Point'],
+    'layout': {
+      'text-field': ['get', 'name'],
+      'text-font': ['NotoSansMedium'],
+      'text-size': 13,
+      'text-offset': [0, 1.3],
+      'text-anchor': 'top',
+      'text-allow-overlap': true,
+    },
+    'paint': {'text-color': '#c92a2a', 'text-halo-color': '#ffffff', 'text-halo-width': 1.6},
+  },
   {
     'id': 'wpts',
     'type': 'circle',
@@ -641,6 +677,46 @@ class MapControl {
 
   static const _emptyFc = <String, dynamic>{'type': 'FeatureCollection', 'features': <dynamic>[]};
 
+  /// 지도를 길게 눌렀을 때 (메인 화면이 "여기로 안내 / 지점 저장" 메뉴를 띄움)
+  void Function(double lat, double lon)? onLongPress;
+
+  // ---- 목표 지점 안내 선 ----
+  NavTarget? _target;
+  (double, double)? _me;
+
+  void setTarget(NavTarget? t) {
+    _target = t;
+    _drawTarget();
+  }
+
+  void _drawTarget() {
+    final t = _target, me = _me;
+    if (!_ready) return;
+    _ctl?.setGeoJsonSource('target', {
+      'type': 'FeatureCollection',
+      'features': [
+        if (t != null && me != null)
+          {
+            'type': 'Feature',
+            'geometry': {
+              'type': 'LineString',
+              'coordinates': [
+                [me.$2, me.$1],
+                [t.lon, t.lat]
+              ],
+            },
+            'properties': <String, dynamic>{},
+          },
+        if (t != null)
+          {
+            'type': 'Feature',
+            'geometry': {'type': 'Point', 'coordinates': [t.lon, t.lat]},
+            'properties': {'name': t.name},
+          },
+      ],
+    });
+  }
+
   void _attach(MapLibreMapController c) {
     _ctl = c;
     _ready = false;
@@ -651,6 +727,7 @@ class MapControl {
     _ctl?.setGeoJsonSource('track', _track);
     _ctl?.setGeoJsonSource('wpts', _wpts);
     _ctl?.setGeoJsonSource('water', _water);
+    _drawTarget();
     for (final g in layerGroups) {
       if (hidden.value.contains(g.id)) _applyGroup(g, false);
     }
@@ -862,6 +939,8 @@ class _MapPageState extends State<MapPage> {
         }
       ],
     });
+    ctl._me = (s.lat!, s.lon!);
+    if (ctl._target != null) ctl._drawTarget();
     if (ctl.follow.value) c.animateCamera(CameraUpdate.newLatLng(LatLng(s.lat!, s.lon!)));
   }
 
@@ -920,6 +999,7 @@ class _MapPageState extends State<MapPage> {
               if (cam != null) _lastCamera = ctl.camera.value = cam;
             },
             onCameraTrackingDismissed: () => ctl.follow.value = false,
+            onMapLongClick: (_, ll) => ctl.onLongPress?.call(ll.latitude, ll.longitude),
             ),
           ),
           // 왼쪽 위: 축척 막대 + 지도 출처 (OpenStreetMap 표시는 필수)
