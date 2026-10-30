@@ -390,6 +390,7 @@ RouteInfo routeInfo(GpxRoute r, double lat, double lon, double? hAcc) {
 class RouteFollow {
   final route = ValueNotifier<GpxRoute?>(null);
   final info = ValueNotifier<RouteInfo?>(null);
+  NavTarget? target; // 길찾기로 만든 경로의 목적지 (벗어나면 다시 찾기)
 
   Future<File> _file() async => File('${(await _dataDir('guide')).path}/route.gpx');
 
@@ -400,13 +401,15 @@ class RouteFollow {
     } catch (_) {}
   }
 
-  Future<void> start(GpxRoute r) async {
+  Future<void> start(GpxRoute r, {NavTarget? target}) async {
+    this.target = target;
     route.value = r;
     info.value = null;
     await (await _file()).writeAsString(TrackRecorder.toGpx(r.name, r.pts));
   }
 
   Future<void> stop() async {
+    target = null;
     route.value = null;
     info.value = null;
     final f = await _file();

@@ -14,6 +14,7 @@ import 'analysis.dart';
 import 'main.dart';
 import 'nav.dart';
 import 'offline_map.dart';
+import 'routing.dart' show RouteException, findRouteInBackground;
 import 'updater.dart';
 import 'water.dart' show WaterSource, waterChipLabel;
 import 'weather.dart';
@@ -122,6 +123,9 @@ class _MainScreenState extends State<MainScreen> {
       messenger.showSnackBar(SnackBar(
         backgroundColor: Colors.red.shade800,
         content: Text('경로 이탈 ${distanceLabel(i.off)} — 경로는 ${directionLabel(i.toRoute)} 쪽'),
+        action: widget.route.target == null
+            ? null
+            : SnackBarAction(label: '다시 찾기', onPressed: () => _findRoute(widget.route.target!)),
       ));
     }
     _wasOff = i.offRoute;
@@ -146,7 +150,67 @@ class _MainScreenState extends State<MainScreen> {
     ));
   }
 
-  /// 지도를 길게 누른 곳: 거리·고도를 보여 주고 "여기로 안내" / "지점으로 저장"
+  bool _routing = false;
+
+  /// 현재 위치에서 [t]까지 길 따라 경로를 찾아 "경로 따라가기"로 안내 (직선 안내는 끝냄)
+  Future<void> _findRoute(NavTarget t) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final s = widget.snap.value;
+    if (s.lat == null || s.lon == null || s.fixQ == 0) {
+      messenger.showSnackBar(const SnackBar(content: Text('현재 위치를 아직 모릅니다. 위치를 잡은 뒤 다시 눌러 주세요')));
+      return;
+    }
+    final store = MapStore.instance;
+    String? pathOf(String kind) {
+      final p = store.installed.value.where((p) => p.kind == kind).firstOrNull;
+      return p == null ? null : store.fileOf(p.id);
+    }
+
+    final graph = pathOf('routes');
+    if (graph == null) {
+      messenger.showSnackBar(SnackBar(
+        content: const Text('길찾기에는 "대한민국 길찾기" 자료가 필요합니다'),
+        action: SnackBarAction(
+          label: '받기',
+          onPressed: () =>
+              Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage())),
+        ),
+      ));
+      return;
+    }
+    if (_routing) return;
+    _routing = true;
+    messenger.showSnackBar(const SnackBar(content: Text('길 찾는 중…'), duration: Duration(minutes: 1)));
+    try {
+      final r = await findRouteInBackground(graph, pathOf('dem'), s.lat!, s.lon!, t.lat, t.lon);
+      if (!mounted) return;
+      await widget.route.start(
+        GpxRoute('길찾기: ${t.name}', [for (final (la, lo, h) in r.pts) TrackPoint(la, lo, h, DateTime(0))]),
+        target: t,
+      );
+      widget.guide.stop();
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(
+        duration: const Duration(seconds: 8),
+        content: Text([
+          '${distanceLabel(r.length)}  ·  걸어서 약 ${durationLabel(walkTime(r.length, r.up))}',
+          '오르막 ${r.up.round()} m · 내리막 ${r.down.round()} m',
+          if (r.warnings.isNotEmpty) '피할 수 없는 구간: ${r.warnings.join(', ')}',
+          if (r.startGap > 50) '가장 가까운 길까지 ${distanceLabel(r.startGap)} 먼저 이동',
+        ].join('\n')),
+      ));
+    } on RouteException catch (e) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (e) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text('길찾기 실패: $e')));
+    } finally {
+      _routing = false;
+    }
+  }
+
+  /// 지도를 길게 누른 곳: 거리·고도를 보여 주고 "길 따라 안내" / "직선으로 안내" / "지점으로 저장"
   void _onLongPress(double lat, double lon) {
     final s = widget.snap.value;
     final elev = widget.analysis.elevationAt(lat, lon);
@@ -164,8 +228,17 @@ class _MainScreenState extends State<MainScreen> {
                 '${elev == null ? '' : '  ·  고도 ${elev.round()} m'}'),
           ),
           ListTile(
+            leading: const Icon(Icons.alt_route),
+            title: const Text('길 따라 안내'),
+            subtitle: const Text('도로·등산로를 따라, 오르막과 큰 차도는 피해서'),
+            onTap: () {
+              Navigator.pop(ctx);
+              _findRoute(NavTarget('선택한 곳', lat, lon));
+            },
+          ),
+          ListTile(
             leading: const Icon(Icons.flag_outlined),
-            title: const Text('여기로 안내'),
+            title: const Text('직선으로 안내'),
             onTap: () {
               Navigator.pop(ctx);
               _guideTo(NavTarget('선택한 곳', lat, lon));
@@ -532,6 +605,7 @@ class _MainScreenState extends State<MainScreen> {
                 sensors: widget.sensors,
                 weather: widget.weather,
                 track: widget.track,
+                onRoute: _findRoute,
               ),
             ),
           ),
@@ -725,8 +799,10 @@ class _InfoPanel extends StatelessWidget {
   final ValueListenable<GnssSnapshot> snap;
   final ValueListenable<List<SensorSample>> sensors;
   final ValueListenable<StormStatus> weather;
+  final void Function(NavTarget) onRoute;
   final TrackRecorder track;
   const _InfoPanel({
+    required this.onRoute,
     required this.scroll,
     required this.advice,
     required this.guide,
@@ -754,7 +830,7 @@ class _InfoPanel extends StatelessWidget {
           ),
         ),
         _RouteCard(route: route),
-        _GuideCard(guide: guide, analysis: analysis),
+        _GuideCard(guide: guide, analysis: analysis, onRoute: onRoute),
         _AdviceList(advice: advice),
         Row(children: [
           Expanded(
@@ -1253,7 +1329,8 @@ class _SettingsPageState extends State<SettingsPage> {
 class _GuideCard extends StatelessWidget {
   final Guide guide;
   final TerrainAnalysis analysis;
-  const _GuideCard({required this.guide, required this.analysis});
+  final void Function(NavTarget) onRoute;
+  const _GuideCard({required this.guide, required this.analysis, required this.onRoute});
 
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<NavTarget?>(
@@ -1309,6 +1386,11 @@ class _GuideCard extends StatelessWidget {
                             ),
                           if (slope != null && i != null && !i.arrived) Text('목표 방향 $slope', style: sub),
                         ]),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.alt_route),
+                        tooltip: '길 따라 안내',
+                        onPressed: () => onRoute(t),
                       ),
                       IconButton(
                         icon: const Icon(Icons.close),

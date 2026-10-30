@@ -6,6 +6,9 @@ name: Build routing graph
 
 on:
   workflow_dispatch:
+  push: # 길 종류·파일 형식을 바꾸면 자료도 다시 만듦
+    branches: [main]
+    paths: ['lib/routing.dart', 'tool/build_routes.dart', '.github/workflows/routes.yml']
   schedule:
     - cron: '0 6 1 * *' # 매월 1일 (기본 지도 갱신 뒤)
 
