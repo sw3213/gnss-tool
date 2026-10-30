@@ -1153,7 +1153,8 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
     final title = bundleTitle(parts);
     final total = parts.fold<int>(0, (a, p) => a + p.size);
     MapPack? mine(MapPack p) => installed.where((x) => x.id == p.id).firstOrNull;
-    bool fresh(MapPack p) => mine(p) != null && mine(p)!.date.compareTo(p.date) >= 0;
+    // 같은 날 다시 만든 파일은 날짜가 같으므로 크기도 비교
+    bool fresh(MapPack p) => mine(p) != null && mine(p)!.date.compareTo(p.date) >= 0 && mine(p)!.size == p.size;
     final busy = [for (final p in parts) if (progress.containsKey(p.id)) p];
     final need = [for (final p in parts) if (!fresh(p) && !progress.containsKey(p.id)) p];
     final failed = [for (final p in parts) if (store.failures.value[p.id] != null) store.failures.value[p.id]!];
