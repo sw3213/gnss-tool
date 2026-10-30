@@ -64,7 +64,8 @@ void main() {
 
     // 레이어 버튼의 묶음마다 실제 레이어가 하나 이상 걸려야 함
     const terrain = MapPack('kr-terrain', '지형', 'u', '2026-10-30', [124.5, 33, 132, 38.7], 1, kind: 'terrain');
-    final all = jsonDecode(await buildStyle([base, terrain, names])) as Map<String, dynamic>;
+    const shade = MapPack('kr-hillshade', '음영', 'u', '2026-10-30', [124.5, 33, 132, 38.7], 1, kind: 'hillshade');
+    final all = jsonDecode(await buildStyle([base, terrain, names, shade])) as Map<String, dynamic>;
     final allIds = [for (final l in all['layers'] as List) (l as Map)['id'] as String];
     for (final g in MapControl.layerGroups) {
       expect(allIds.where((id) => g.suffixes.any(id.endsWith)), isNotEmpty, reason: g.id);

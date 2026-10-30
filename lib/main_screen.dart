@@ -447,7 +447,7 @@ class _MainScreenState extends State<MainScreen> {
                 ValueListenableBuilder<bool>(
                   valueListenable: widget.map.tilted,
                   builder: (_, on, __) => _RoundButton(
-                    tooltip: '3D (기울여 보기)',
+                    tooltip: '3D (기울여 보기, 3D 건물)',
                     active: on,
                     onTap: widget.map.toggleTilt,
                     child: const Text('3D', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),

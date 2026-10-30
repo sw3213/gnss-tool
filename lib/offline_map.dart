@@ -282,6 +282,19 @@ Future<String> buildStyle(List<MapPack> packs) async {
     };
   }
   final nameLayers = [for (final p in names) ..._buildingNameLayers('l_${p.id}')];
+
+  // 지형 음영(산 그림자): hillshade.yml이 만든 고도 타일. 고도 색칠 위, 등고선과 같은 높이에 그림
+  final shades = [for (final p in packs) if (p.kind == 'hillshade') p];
+  for (final p in shades) {
+    sources['h_${p.id}'] = {
+      'type': 'raster-dem',
+      'url': 'pmtiles://file://${MapStore.instance.fileOf(p.id)}',
+      'encoding': 'terrarium',
+      'tileSize': 256,
+      'attribution': '© Copernicus DEM (ESA)',
+    };
+  }
+  contours.insertAll(0, [for (final p in shades) ..._hillshadeLayers('h_${p.id}')]);
   var placed = false;
 
   for (final p in packs.where((p) => p.kind == 'basemap')) {
@@ -302,6 +315,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
       // 라벨(번지) 바로 앞에 우리 레이어를 끼워 넣어 도로 위, 글자 아래에 그려지게 함
       if (l['id'] == 'address_label') layers.addAll(_extraLayers(s));
       layers.add(_tweak({...l, 'id': '$s-${l['id']}', 'source': s}, l['id'] as String));
+      if (l['id'] == 'buildings') layers.add(_buildings3d(s)); // 3D 버튼을 누르면 보임
     }
     placed = true;
   }
@@ -383,6 +397,38 @@ List<Map<String, dynamic>> _contourLabelLayers(String s) => [
         'paint': {'text-color': '#7a4f28', 'text-halo-color': '#ffffff', 'text-halo-width': 1.2},
       },
     ];
+
+/// 산 그림자: 북서쪽 빛 기준. 고도 색칠·등고선과 겹쳐 입체감을 줌
+List<Map<String, dynamic>> _hillshadeLayers(String s) => [
+      {
+        'id': '$s-hillshade',
+        'type': 'hillshade',
+        'source': s,
+        'paint': {
+          'hillshade-exaggeration': ['interpolate', ['linear'], ['zoom'], 6, 0.45, 12, 0.6, 16, 0.4],
+          'hillshade-shadow-color': '#3b3020',
+          'hillshade-highlight-color': '#fffdf5',
+          'hillshade-accent-color': '#5a4a32',
+        },
+      },
+    ];
+
+/// 3D 건물: 기울여 볼 때만 켬 (MapControl.toggleTilt). 높이 정보가 없는 건물은 2층(6 m)으로
+Map<String, dynamic> _buildings3d(String s) => {
+      'id': '$s-buildings-3d',
+      'type': 'fill-extrusion',
+      'source': s,
+      'source-layer': 'buildings',
+      'minzoom': 14,
+      'filter': ['==', ['get', 'kind'], 'building'],
+      'layout': {'visibility': 'none'},
+      'paint': {
+        'fill-extrusion-color': '#d8d0c8',
+        'fill-extrusion-height': ['coalesce', ['get', 'height'], 6],
+        'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
+        'fill-extrusion-opacity': 0.85,
+      },
+    };
 
 // ---------------- 건물 이름 (labels.yml이 만든 bldg 레이어: name, short, dong) ----------------
 
@@ -732,6 +778,7 @@ class MapControl {
 
   void _styleLoaded() {
     _ready = true;
+    if (tilted.value) _show3dBuildings();
     _ctl?.setGeoJsonSource('track', _track);
     _ctl?.setGeoJsonSource('wpts', _wpts);
     _ctl?.setGeoJsonSource('water', _water);
@@ -742,12 +789,20 @@ class MapControl {
     }
   }
 
+  /// 3D 건물은 기울여 볼 때만 (위에서 볼 때는 평면 건물과 같아 보이고 그리기만 무거움)
+  void _show3dBuildings() {
+    for (final id in _layerIds) {
+      if (id.endsWith('-buildings-3d')) _ctl?.setLayerVisibility(id, tilted.value);
+    }
+  }
+
   // ---- 레이어 켜고 끄기 (레이어 버튼). 끈 목록은 map_layers.json에 저장 ----
 
   /// 스타일의 레이어 id 끝부분([suffixes])으로 묶음
   static const layerGroups = [
     (id: 'contour', label: '등고선', icon: Icons.terrain_outlined, suffixes: ['-contour', '-contour-label']),
     (id: 'bands', label: '고도 색칠', icon: Icons.gradient, suffixes: ['-bands']),
+    (id: 'hillshade', label: '산 그림자 (입체 음영)', icon: Icons.landscape_outlined, suffixes: ['-hillshade']),
     (id: 'trails', label: '등산로 강조', icon: Icons.hiking, suffixes: ['-trails']),
     (id: 'pois', label: '장소 아이콘', icon: Icons.place_outlined, suffixes: ['-pois']),
     (id: 'dong', label: '건물·아파트 이름', icon: Icons.apartment, suffixes: ['-dong', '-complex']),
@@ -815,6 +870,7 @@ class MapControl {
   void toggleTilt() {
     tilted.value = !tilted.value;
     _ctl?.animateCamera(CameraUpdate.tiltTo(tilted.value ? 60 : 0));
+    _show3dBuildings();
   }
 
   Map<String, dynamic> _route = _emptyFc;
@@ -1374,7 +1430,7 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
 
 /// 카탈로그를 나라별로 묶음: "kr", "kr-terrain", "kr-labels", "kr-dem" -> 대한민국 하나
 List<List<MapPack>> bundleCatalog(List<MapPack> catalog) {
-  const order = ['basemap', 'terrain', 'labels', 'dem'];
+  const order = ['basemap', 'terrain', 'hillshade', 'labels', 'dem'];
   final groups = <String, List<MapPack>>{};
   for (final p in catalog) {
     groups.putIfAbsent(p.id.split('-').first, () => []).add(p);
@@ -1390,6 +1446,7 @@ String partLabel(MapPack p) => switch (p.kind) {
       'basemap' => '지도',
       'terrain' => '등고선',
       'labels' => '건물·아파트 이름',
+      'hillshade' => '산 그림자',
       'dem' => '지형 분석',
       _ => p.name,
     };
