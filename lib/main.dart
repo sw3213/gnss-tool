@@ -517,7 +517,9 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     // 앱을 내려도 GPS·센서를 계속 켜 둠 (사용자 선택: 내렸다 돌아올 때 다시 잡는 게 불편).
     // 배터리를 더 쓰며, 안드로이드가 백그라운드 위치·센서 전달을 줄일 수는 있음
+    storm.onMinute = _saveWeather;
     _resume();
+    _loadWeather();
     _loadSource();
     parser.notifier.addListener(_onPosition);
     track.points.addListener(() => mapControl.setTrack(track.points.value));
@@ -582,6 +584,29 @@ class _HomePageState extends State<HomePage> {
   Future<void> _saveSource(DataSource s) async {
     try {
       await (await _settingsFile()).writeAsString(jsonEncode({'source': s.name}));
+    } catch (_) {}
+  }
+
+  // 해면기압 1분 평균(최근 3시간)을 저장해 앱을 다시 켜도 폭풍 경보 추세가 이어지게 함.
+  // 시뮬레이션 값은 저장하지 않음 (실제 기록을 덮어쓰지 않게)
+  Future<File> _weatherFile() async => File('${(await getApplicationDocumentsDirectory()).path}/weather_qnh.json');
+
+  Future<void> _loadWeather() async {
+    if (!isAndroid || source == DataSource.sim) return;
+    try {
+      final f = await _weatherFile();
+      if (!f.existsSync()) return;
+      final xs = StormWatch.decode(await f.readAsString());
+      if (source == DataSource.sim || storm.minutes.isNotEmpty) return; // 읽는 사이 출처가 바뀌었거나 새 기록이 생김
+      storm.restore(xs, DateTime.now());
+      qnhHistory.value = storm.minutes;
+    } catch (_) {}
+  }
+
+  Future<void> _saveWeather() async {
+    if (!isAndroid || source == DataSource.sim) return;
+    try {
+      await (await _weatherFile()).writeAsString(storm.encode());
     } catch (_) {}
   }
 
@@ -656,7 +681,7 @@ class _HomePageState extends State<HomePage> {
     if (p != null) {
       baro.update(p, gnssAlt);
       final q = baro.qnh;
-      if (q != null) _onWeather(storm.add(now, q));
+      if (q != null && baro.settled) _onWeather(storm.add(now, q));
     }
     final next = [
       ...sensors.value,
@@ -796,13 +821,19 @@ class _HomePageState extends State<HomePage> {
     log.value = [];
     sensors.value = [];
     baro.reset();
-    storm.clear(); // 시뮬레이션과 실제 기압이 섞이지 않게
-    weather.value = const StormStatus();
-    qnhHistory.value = [];
-    alert.value = null;
-    _alerted = StormLevel.none;
+    // 시뮬레이션과 실제 기압이 섞이지 않게. 폰 기압계 <-> 외부 장치는 같은 공기라 추세를 이어 감
+    // (센서마다 다른 기압 오차는 GNSS 고도 보정이 해면기압에서 지워 줌)
+    final real = source != DataSource.sim && s != DataSource.sim;
+    if (!real) {
+      storm.clear();
+      weather.value = const StormStatus();
+      qnhHistory.value = [];
+      alert.value = null;
+      _alerted = StormLevel.none;
+    }
     setState(() => source = s);
     _start();
+    if (s != DataSource.sim && storm.minutes.isEmpty) _loadWeather(); // 시뮬레이션에서 돌아오면 저장해 둔 실제 기록을 다시 읽음
   }
 
   @override

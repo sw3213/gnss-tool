@@ -94,4 +94,52 @@ void main() {
   test('DOP from geometry: too few satellites returns null', () {
     expect(dopFromSats([const Sat('GPS', 1, 40, 0, 40, used: true)]), isNull);
   });
+
+  test('weather: saved history survives a restart and the trend continues', () {
+    final w = StormWatch();
+    var saved = 0;
+    w.onMinute = () => saved++;
+    // 1시간 동안 5 hPa/3h로 하강
+    for (int i = 0; i < 60 * 60; i++) {
+      w.add(t0.add(Duration(seconds: i)), 1019 - 5 / (3 * 3600) * i);
+    }
+    expect(saved, 59);
+    final text = w.encode();
+
+    // 20분 꺼져 있다가 다시 켬: 기록을 되살리고 계속 하강
+    final w2 = StormWatch();
+    final back = t0.add(const Duration(minutes: 80));
+    w2.restore(StormWatch.decode(text), back);
+    expect(w2.minutes.length, 59);
+    late StormStatus st;
+    for (int i = 0; i < 120; i++) {
+      final s = 80 * 60 + i;
+      st = w2.add(t0.add(Duration(seconds: s)), 1019 - 5 / (3 * 3600) * s);
+    }
+    expect(st.spanMin, greaterThan(80));
+    expect(st.rate3h, closeTo(-5, 0.3));
+    expect(st.level, StormLevel.warning);
+  });
+
+  test('weather: restore drops values older than 3 hours or in the future', () {
+    final w = StormWatch();
+    final now = t0.add(const Duration(hours: 4));
+    w.restore([
+      (t0, 1010.0), // 4시간 전
+      (now.subtract(const Duration(minutes: 30)), 1012.0),
+      (now.subtract(const Duration(minutes: 90)), 1011.0),
+      (now.add(const Duration(minutes: 5)), 1013.0), // 시계가 바뀜
+    ], now);
+    expect(w.minutes.map((e) => e.$2), [1011.0, 1012.0]);
+  });
+
+  test('filter: settles only after enough GNSS heights', () {
+    final f = BaroAltFilter();
+    for (int i = 0; i < 29; i++) {
+      f.update(station(1019, 180), noisy(180));
+    }
+    expect(f.settled, isFalse);
+    f.update(station(1019, 180), noisy(180));
+    expect(f.settled, isTrue);
+  });
 }

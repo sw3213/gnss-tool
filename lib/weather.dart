@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math';
 
 // ============================================================
@@ -22,6 +23,10 @@ class BaroAltFilter {
   int _n = 0;
 
   double? get alt => _alt; // 보정된 고도 (m)
+
+  /// GNSS 고도를 충분히 평균해 해면기압이 자리 잡았는지. 시작 직후 값은 GNSS 오차(±10 m ≈ ±1 hPa)를
+  /// 그대로 담고 있어, 저장해 둔 기록에 이어 붙이면 가짜 기압 변화가 됨
+  bool get settled => _n >= 30;
 
   void reset() {
     _alt = _lastP = qnh = null;
@@ -86,6 +91,32 @@ class StormWatch {
   double _sum = 0;
   int _cnt = 0;
 
+  /// 1분 평균이 하나 끝날 때마다 호출 (앱을 다시 켜도 추세가 이어지게 저장하는 용도)
+  void Function()? onMinute;
+
+  /// 1분 평균 기록 (최근 3시간)
+  List<(DateTime, double)> get minutes => List.unmodifiable(_minutes);
+
+  /// 지난 실행에서 저장한 1분 평균을 되살림. 3시간보다 오래됐거나 [now] 이후(시계 변경)인 값은 버림.
+  /// 꺼져 있던 공백은 추세 계산이 실제 시각으로 처리함
+  void restore(Iterable<(DateTime, double)> xs, DateTime now) {
+    _minutes
+      ..clear()
+      ..addAll(xs.where((e) => !e.$1.isAfter(now) && now.difference(e.$1).inMinutes <= 180))
+      ..sort((a, b) => a.$1.compareTo(b.$1));
+    _seconds.clear();
+    _bucket = null;
+    _sum = 0;
+    _cnt = 0;
+  }
+
+  String encode() => jsonEncode([for (final (t, q) in _minutes) [t.millisecondsSinceEpoch, q]]);
+
+  static List<(DateTime, double)> decode(String s) => [
+        for (final e in jsonDecode(s) as List)
+          (DateTime.fromMillisecondsSinceEpoch((e[0] as num).toInt()), (e[1] as num).toDouble()),
+      ];
+
   void clear() {
     _minutes.clear();
     _seconds.clear();
@@ -96,15 +127,18 @@ class StormWatch {
 
   StormStatus add(DateTime t, double qnh) {
     final minute = DateTime(t.year, t.month, t.day, t.hour, t.minute);
+    var closed = false;
     if (_bucket != null && minute != _bucket) {
       _minutes.add((_bucket!, _sum / _cnt));
       _sum = 0;
       _cnt = 0;
+      closed = true;
     }
     _bucket = minute;
     _sum += qnh;
     _cnt++;
     _minutes.removeWhere((e) => t.difference(e.$1).inMinutes > 180);
+    if (closed) onMinute?.call();
 
     _seconds.add((t, qnh));
     _seconds.removeWhere((e) => t.difference(e.$1).inSeconds > 300);
