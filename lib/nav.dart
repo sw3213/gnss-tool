@@ -301,6 +301,27 @@ class GpxRoute {
 
   double get total => cum.isEmpty ? 0 : cum.last;
 
+  /// 갈림길에서 꺾는 곳 (음성 안내용, 처음 쓸 때 한 번 계산)
+  late final List<RouteTurn> turns = findTurns(this);
+
+  /// 시작점부터 [d] m 지점의 위치
+  (double, double) pointAt(double d) {
+    if (d <= 0) return (pts.first.lat, pts.first.lon);
+    if (d >= total) return (pts.last.lat, pts.last.lon);
+    var lo = 0, hi = cum.length - 1;
+    while (hi - lo > 1) {
+      final m = (lo + hi) ~/ 2;
+      if (cum[m] <= d) {
+        lo = m;
+      } else {
+        hi = m;
+      }
+    }
+    final seg = cum[hi] - cum[lo], t = seg == 0 ? 0.0 : (d - cum[lo]) / seg;
+    final a = pts[lo], b = pts[hi];
+    return (a.lat + (b.lat - a.lat) * t, a.lon + (b.lon - a.lon) * t);
+  }
+
   GpxRoute reversed() => GpxRoute('$name (되돌아가기)', pts.reversed.toList());
 
   static List<double> _cumulative(List<TrackPoint> pts) {
@@ -335,6 +356,44 @@ GpxRoute? parseGpx(String xml, String fallbackName) {
   return GpxRoute(name == null || name.isEmpty ? fallbackName : _xmlUnescape(name), pts);
 }
 
+/// 경로에서 꺾는 곳: [at] 시작점부터 거리 (m), [angle] 꺾는 각도 (-180 왼쪽 ~ +180 오른쪽)
+class RouteTurn {
+  final double at, angle;
+  const RouteTurn(this.at, this.angle);
+}
+
+/// 꺾는 곳 찾기: 각 점에서 20 m 앞뒤 방향을 비교해 40° 넘게 바뀌면 꺾는 곳.
+/// 굽은 길은 점이 여러 개라 20 m 안의 후보는 하나로 묶고 가장 크게 꺾는 점을 씀 (완만한 커브는 안 잡힘)
+List<RouteTurn> findTurns(GpxRoute r, {double window = 20, double minAngle = 40}) {
+  final out = <RouteTurn>[];
+  for (var k = 1; k + 1 < r.pts.length; k++) {
+    final c = r.cum[k];
+    if (c < 5 || r.total - c < 5) continue;
+    final p = r.pts[k];
+    final (bLat, bLon) = r.pointAt(c - window);
+    final (aLat, aLon) = r.pointAt(c + window);
+    if (distanceM(bLat, bLon, p.lat, p.lon) < 3 || distanceM(p.lat, p.lon, aLat, aLon) < 3) continue;
+    final inB = bearingDeg(bLat, bLon, p.lat, p.lon), outB = bearingDeg(p.lat, p.lon, aLat, aLon);
+    final a = (outB - inB + 540) % 360 - 180;
+    if (a.abs() < minAngle) continue;
+    if (out.isNotEmpty && c - out.last.at < window) {
+      if (a.abs() > out.last.angle.abs()) out[out.length - 1] = RouteTurn(c, a);
+    } else {
+      out.add(RouteTurn(c, a));
+    }
+  }
+  return out;
+}
+
+/// 꺾는 각도 -> "약간 왼쪽", "왼쪽", "크게 오른쪽", "뒤로 돌아"
+String turnWord(double angle) {
+  final a = angle.abs(), side = angle < 0 ? '왼쪽' : '오른쪽';
+  if (a >= 160) return '뒤로 돌아';
+  if (a >= 120) return '크게 $side';
+  if (a >= 60) return side;
+  return '약간 $side';
+}
+
 class RouteInfo {
   final double off; // 경로에서 떨어진 거리 (m)
   final double done, left; // 경로를 따라 지나온 / 남은 거리 (m)
@@ -342,7 +401,12 @@ class RouteInfo {
   final double toRoute; // 경로로 돌아가는 방향 (도)
   final double climbLeft; // 남은 오르막 합 (m, 고도가 없는 GPX는 0)
   final bool offRoute, finished;
-  const RouteInfo(this.off, this.done, this.left, this.ahead, this.toRoute, this.climbLeft, this.offRoute, this.finished);
+  final RouteTurn? next; // 다음에 꺾는 곳 (없으면 목적지까지 쭉)
+  const RouteInfo(this.off, this.done, this.left, this.ahead, this.toRoute, this.climbLeft, this.offRoute, this.finished,
+      [this.next]);
+
+  /// 다음 꺾는 곳까지 남은 거리 (m)
+  double? get toNext => next == null ? null : next!.at - done;
 
   Duration get walk => walkTime(left, climbLeft);
 }
@@ -383,7 +447,7 @@ RouteInfo routeInfo(GpxRoute r, double lat, double lon, double? hAcc) {
   }
   final left = r.total - done;
   return RouteInfo(best, done, left, ahead, bearingDeg(lat, lon, pLat, pLon), climb, best > offRouteLimit(hAcc),
-      left <= arriveRadius(hAcc) && best <= offRouteLimit(hAcc));
+      left <= arriveRadius(hAcc) && best <= offRouteLimit(hAcc), r.turns.where((t) => t.at > done).firstOrNull);
 }
 
 /// 지금 따라가는 경로 (앱을 다시 켜도 이어서: documents/guide/route.gpx)

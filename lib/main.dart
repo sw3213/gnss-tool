@@ -17,6 +17,7 @@ import 'nav.dart';
 import 'offline_map.dart';
 import 'phone_gnss.dart';
 import 'updater.dart';
+import 'voice.dart';
 import 'weather.dart';
 
 void main() => runApp(const GnssApp());
@@ -536,6 +537,7 @@ class _HomePageState extends State<HomePage> {
       mapControl.setRoute(route.route.value?.pts);
       _updateGuide();
     });
+    VoiceGuide(route); // 경로 따라가기 음성 안내
     route.load();
     advice.start();
     if (isAndroid) analysis.start(); // 고도 데이터·지도 파일은 안드로이드에서만 받음

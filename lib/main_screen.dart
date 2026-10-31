@@ -16,6 +16,7 @@ import 'nav.dart';
 import 'offline_map.dart';
 import 'routing.dart' show RouteException, findRouteInBackground;
 import 'updater.dart';
+import 'voice.dart';
 import 'water.dart' show WaterSource, waterChipLabel;
 import 'weather.dart';
 
@@ -1455,7 +1456,10 @@ class _RouteCard extends StatelessWidget {
                               off
                                   ? '경로로 돌아가기: ${directionLabel(i.toRoute)} 방향'
                                   : [
-                                      '진행 방향 ${directionLabel(i.ahead)}',
+                                      if (i.toNext != null && i.toNext! <= 500)
+                                        '${distanceLabel(i.toNext!)} 앞 ${turnWord(i.next!.angle)}'
+                                      else
+                                        '진행 방향 ${directionLabel(i.ahead)}',
                                       '걸어서 약 ${durationLabel(i.walk)}',
                                       if (i.climbLeft >= 10) '남은 오르막 ${i.climbLeft.round()} m',
                                     ].join('  ·  '),
@@ -1471,6 +1475,26 @@ class _RouteCard extends StatelessWidget {
                               ),
                             ),
                         ]),
+                      ),
+                      ValueListenableBuilder<bool>(
+                        valueListenable: Voice.instance.enabled,
+                        builder: (context, on, _) => IconButton(
+                          icon: Icon(on ? Icons.volume_up : Icons.volume_off, color: on ? null : Colors.white38),
+                          tooltip: on ? '음성 안내 끄기' : '음성 안내 켜기',
+                          onPressed: () async {
+                            final messenger = ScaffoldMessenger.of(context);
+                            Voice.instance.enabled.value = !on;
+                            if (on) return Voice.instance.stop();
+                            final err = await Voice.instance.speak('음성 안내를 켭니다', flush: true);
+                            if (err != null) {
+                              messenger.showSnackBar(SnackBar(
+                                content: Text(err == 'NO_KOREAN'
+                                    ? '음성 엔진에 한국어가 없습니다. 설정 > 일반 > 텍스트 음성 변환에서 한국어를 받아 주세요'
+                                    : '폰의 음성 엔진(텍스트 음성 변환)을 쓸 수 없습니다'),
+                              ));
+                            }
+                          },
+                        ),
                       ),
                       IconButton(icon: const Icon(Icons.close), tooltip: '따라가기 종료', onPressed: route.stop),
                     ]),

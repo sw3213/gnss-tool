@@ -23,21 +23,67 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.media.AudioAttributes
+import android.speech.tts.TextToSpeech
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.util.Locale
 
 // 폰 내장 GNSS / 기압계 -> Dart (데이터 출처 "폰 GPS". 나중에 ESP32 BLE가 같은 자리에 들어감)
 //  gnss_tool/gnss     : {type: nmea|sats|loc, ...}  오류 코드 PERMISSION_DENIED, GPS_OFF
 //  gnss_tool/pressure : 1초 평균 기압(hPa)           오류 코드 NO_SENSOR
+//  gnss_tool/voice    : speak(text, flush) 음성 안내   결과 null(정상) 또는 NO_ENGINE, NO_KOREAN
 class MainActivity : FlutterActivity() {
     private val main = Handler(Looper.getMainLooper())
     private val lm by lazy { getSystemService(Context.LOCATION_SERVICE) as LocationManager }
     private val sm by lazy { getSystemService(Context.SENSOR_SERVICE) as SensorManager }
     private var gnssSink: EventChannel.EventSink? = null
     private var pressureListener: SensorEventListener? = null
+
+    // 음성 안내: 폰에 깔린 음성 엔진(삼성/구글 TTS)을 씀. 인터넷·권한 불필요
+    private var tts: TextToSpeech? = null
+    private var ttsState: String? = "INIT" // INIT 준비 중, null 정상, NO_ENGINE / NO_KOREAN 사용 불가
+    private val ttsPending = mutableListOf<Pair<String, Boolean>>()
+    private var ttsId = 0
+
+    private fun speak(text: String, flush: Boolean): String? {
+        if (tts == null) {
+            tts = TextToSpeech(this) { status ->
+                val t = tts
+                ttsState = when {
+                    status != TextToSpeech.SUCCESS || t == null -> "NO_ENGINE"
+                    t.setLanguage(Locale.KOREAN) < TextToSpeech.LANG_AVAILABLE -> "NO_KOREAN"
+                    else -> {
+                        t.setAudioAttributes(AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build())
+                        null
+                    }
+                }
+                if (ttsState == null) ttsPending.forEach { (s, f) -> say(s, f) }
+                ttsPending.clear()
+            }
+        }
+        when (ttsState) {
+            "INIT" -> ttsPending += text to flush
+            null -> say(text, flush)
+        }
+        return ttsState.takeIf { it != "INIT" }
+    }
+
+    private fun say(text: String, flush: Boolean) {
+        tts?.speak(text, if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, "g${ttsId++}")
+    }
+
+    override fun onDestroy() {
+        tts?.shutdown()
+        tts = null
+        super.onDestroy()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // 자바 쪽 예외로 죽으면 원인을 파일에 남김 -> 다음 실행 때 앱 화면에 보여 줌
@@ -166,6 +212,18 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "remove" -> result.success(dm.remove(call.argument<Number>("id")!!.toLong()))
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(messenger, "gnss_tool/voice").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "speak" -> result.success(speak(call.argument<String>("text")!!, call.argument<Boolean>("flush") ?: false))
+                "stop" -> {
+                    ttsPending.clear()
+                    tts?.stop()
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }

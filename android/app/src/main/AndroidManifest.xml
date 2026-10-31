@@ -72,5 +72,9 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- 음성 안내: 안드로이드 11+에서 폰의 음성 엔진(TTS)을 찾으려면 필요 (권한 아님) -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE"/>
+        </intent>
     </queries>
 </manifest>
