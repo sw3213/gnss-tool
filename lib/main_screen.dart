@@ -271,6 +271,22 @@ class _MainScreenState extends State<MainScreen> {
           ),
         ),
       ),
+      // 메뉴 버튼 바로 위 (펼치면 가장 먼저 나타남)
+      ValueListenableBuilder<bool>(
+        valueListenable: widget.map.follow,
+        builder: (_, on, __) => labeled(
+          '내 위치',
+          _RoundButton(
+            tooltip: '내 위치',
+            active: on,
+            onTap: () {
+              final s = widget.snap.value;
+              if (s.lat != null && s.lon != null) widget.map.recenter(s.lat!, s.lon!);
+            },
+            child: const Icon(Icons.my_location, size: 22),
+          ),
+        ),
+      ),
     ];
   }
 
@@ -576,7 +592,7 @@ class _MainScreenState extends State<MainScreen> {
               ),
             ]),
           ),
-          // 오른쪽 아래(패널 위): 메뉴 버튼(누르면 이동 시작·레이어·가시권·3D가 위로 펼쳐짐) + 왼쪽에 내 위치
+          // 오른쪽 아래(패널 위): 메뉴 버튼 (누르면 레이어·가시권·3D·이동 시작·내 위치가 위로 펼쳐짐)
           ValueListenableBuilder<double>(
             valueListenable: _sheet,
             builder: (_, ext, __) => Positioned(
@@ -584,21 +600,9 @@ class _MainScreenState extends State<MainScreen> {
               bottom: ext * box.maxHeight + 10,
               child: ValueListenableBuilder<bool>(
                 valueListenable: _menuOpen,
-                builder: (_, open, __) => Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                  ValueListenableBuilder<bool>(
-                    valueListenable: widget.map.follow,
-                    builder: (_, on, __) => _RoundButton(
-                      tooltip: '내 위치',
-                      active: on,
-                      onTap: () {
-                        final s = widget.snap.value;
-                        if (s.lat != null && s.lon != null) widget.map.recenter(s.lat!, s.lon!);
-                      },
-                      child: const Icon(Icons.my_location, size: 22),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                builder: (_, open, __) {
+                  final buttons = open ? _menuButtons() : const <Widget>[];
+                  return Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
                     AnimatedSize(
                       duration: const Duration(milliseconds: 220),
                       curve: Curves.easeOut,
@@ -606,11 +610,11 @@ class _MainScreenState extends State<MainScreen> {
                       child: !open
                           ? const SizedBox(width: 50)
                           : Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                              for (final (i, b) in _menuButtons().indexed)
+                              for (final (i, b) in buttons.indexed)
                                 // 아래 것부터 차례로 올라오며 나타남
                                 TweenAnimationBuilder<double>(
                                   tween: Tween(begin: 0, end: 1),
-                                  duration: Duration(milliseconds: 160 + 50 * (3 - i)),
+                                  duration: Duration(milliseconds: 160 + 50 * (buttons.length - 1 - i)),
                                   curve: Curves.easeOutBack,
                                   builder: (_, t, child) => Opacity(
                                     opacity: t.clamp(0.0, 1.0).toDouble(),
@@ -630,8 +634,8 @@ class _MainScreenState extends State<MainScreen> {
                         child: Icon(open ? Icons.add : Icons.menu, size: 24),
                       ),
                     ),
-                  ]),
-                ]),
+                  ]);
+                },
               ),
             ),
           ),
