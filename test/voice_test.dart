@@ -66,4 +66,17 @@ void main() {
     expect(at(-200, 305), isEmpty);
     expect(speechDistance(1234), '1.2킬로미터');
   });
+
+  test('driving announces earlier and speaks driving time', () {
+    final r = _lRoute(), a = VoiceAnnouncer();
+    List<String> at(double y) {
+      final p = _p(0, y);
+      return a.update(r, routeInfo(r, p.lat, p.lon, 5), carSpeed: 10);
+    }
+
+    // 꺾는 곳이 300 m 앞: 자동차는 400 m 전부터 알리므로 시작하자마자 함께
+    expect(at(0), [startsWith('경로 안내를 시작합니다. 목적지까지 500미터, 차로 약 1분입니다.'), '300미터 앞에서 왼쪽으로 가세요.']);
+    expect(at(100), isEmpty);
+    expect(at(230), ['왼쪽으로 가세요.']); // 80 m 안
+  });
 }

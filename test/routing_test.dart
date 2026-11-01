@@ -12,13 +12,59 @@ void main() {
   setUp(() => tmp = Directory.systemTemp.createTempSync('routes'));
   tearDown(() => tmp.deleteSync(recursive: true));
 
-  RouteGraph build(void Function(RouteGraphBuilder b) add, {double? Function(double, double)? elevation}) {
+  RouteGraph build(void Function(RouteGraphBuilder b) add,
+      {double? Function(double, double)? elevation, bool car = false}) {
     final b = RouteGraphBuilder(126.9, 36.9, 127.1, 37.1, elevation: elevation);
     add(b);
     final path = '${tmp.path}/g${tmp.listSync().length}.grt';
-    b.write(path);
+    b.write(path, car: car);
     return RouteGraph.open(path);
   }
+
+  test('car road classes and one-way from OpenStreetMap tags', () {
+    expect(carWay({'highway': 'motorway'}), (CarClass.motorway, dirForward)); // 고속도로는 일방통행
+    expect(carWay({'highway': 'primary'}), (CarClass.primary, dirBoth));
+    expect(carWay({'highway': 'residential', 'oneway': 'yes'}), (CarClass.minor, dirForward));
+    expect(carWay({'highway': 'residential', 'oneway': '-1'}), (CarClass.minor, dirBackward));
+    expect(carWay({'highway': 'tertiary', 'junction': 'roundabout'}), (CarClass.tertiary, dirForward));
+    expect(carWay({'highway': 'footway'}), isNull);
+    expect(carWay({'highway': 'path'}), isNull);
+    expect(carWay({'highway': 'service', 'access': 'private'}), isNull);
+    expect(carWay({'highway': 'residential', 'motor_vehicle': 'no'}), isNull);
+    expect(carWay({'highway': 'residential', 'access': 'no', 'motorcar': 'yes'}), (CarClass.minor, dirBoth));
+  });
+
+  test('car follows one-way streets', () {
+    // 바로 가는 길은 동쪽 -> 서쪽 일방통행. 서 -> 동은 돌아가야 함
+    final g = build((b) {
+      b.addWay(CarClass.minor, line([(37.0, 127.01), (37.0, 127.0)]), dir: dirForward);
+      b.addWay(CarClass.minor, line([(37.0, 127.0), (37.003, 127.005), (37.0, 127.01)]));
+    }, car: true);
+    final east = findRoute(g, 37.0, 127.0, 37.0, 127.01, mode: RouteMode.car);
+    expect(east.pts.any((p) => (p.$1 - 37.003).abs() < 1e-6), isTrue); // 돌아감
+    final west = findRoute(g, 37.0, 127.01, 37.0, 127.0, mode: RouteMode.car);
+    expect(west.length, closeTo(888, 10)); // 일방통행 방향이라 바로 감
+    expect(west.seconds, closeTo(888 / (25 / 3.6), 5));
+    g.close();
+  });
+
+  test('car uses the highway or avoids it', () {
+    // 고속도로는 곧게 10 km, 국도는 돌아서
+    final g = build((b) {
+      b.addWay(CarClass.motorway, line([(37.0, 126.95), (37.0, 127.05)]), dir: dirForward);
+      b.addWay(CarClass.trunk, line([(37.0, 126.95), (37.03, 127.0), (37.0, 127.05)]));
+    }, car: true);
+    final fast = findRoute(g, 37.0, 126.95, 37.0, 127.05, mode: RouteMode.car);
+    expect(fast.byClass[CarClass.motorway], closeTo(fast.length, 1));
+    final local = findRoute(g, 37.0, 126.95, 37.0, 127.05, mode: RouteMode.carNoHighway);
+    expect(local.byClass[CarClass.motorway], 0);
+    expect(local.byClass[CarClass.trunk], closeTo(local.length, 1));
+    expect(() => findRoute(g, 37.0, 126.95, 37.0, 127.05), throwsA(isA<RouteException>())); // 걷기로는 못 씀
+    // 고속도로는 동쪽 방향 일방통행 -> 서쪽으로는 국도로
+    final back = findRoute(g, 37.0, 127.05, 37.0, 126.95, mode: RouteMode.car);
+    expect(back.byClass[CarClass.motorway], 0);
+    g.close();
+  });
 
   test('way classes from OpenStreetMap tags', () {
     expect(wayClass({'highway': 'path'}), WayClass.path);

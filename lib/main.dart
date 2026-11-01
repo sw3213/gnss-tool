@@ -507,7 +507,7 @@ class _HomePageState extends State<HomePage> {
     weather: weather,
     snap: parser.notifier,
     sun: analysis.sunToday,
-    walkLeft: () => route.info.value?.walk ?? guide.info.value?.walk,
+    walkLeft: () => switch (route.info.value) { final i? => route.timeLeft(i), null => guide.info.value?.walk },
   );
   final heading = ValueNotifier<double?>(null); // 폰이 향한 방위 (진북 기준)
   StreamSubscription<dynamic>? _headingSub;

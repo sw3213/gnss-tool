@@ -11,10 +11,11 @@ import 'dem.dart';
 //   - 오르막은 크게, 내리막은 조금 비용을 매겨 "오르막 적은 길"을 고름
 //   - 큰 차도(국도·간선도로)와 험한 등산로(암릉 등)는 멀어도 피함, 고속도로·자동차 전용도로는 아예 안 씀
 // 연결망은 tool/build_routes.dart가 OpenStreetMap에서 만들어 Release "maps"에 올림 (kind = routes)
+// 자동차용(kind = drive)은 같은 형식으로 자동차 길만 담고 일방통행을 지킴. 고속도로를 쓰거나 피해서 찾음
 // Flutter 없이도 쓰도록 dart: 라이브러리만 씀
 //
 // 파일 형식 (리틀엔디언)
-//   헤더 48바이트: b'GRTE', u16 버전(2), u16 0, f64 서쪽 경도, f64 남쪽 위도, f64 칸 크기(도),
+//   헤더 48바이트: b'GRTE', u16 버전(2), u16 자료 종류(0 걷기, 1 자동차), f64 서쪽 경도, f64 남쪽 위도, f64 칸 크기(도),
 //                  u32 가로 칸 수, u32 세로 칸 수, u32 전체 갈림길 수, u32 0
 //   u32 칸마다 첫 갈림길 번호 (칸 수 + 1)개: 칸 c의 갈림길 = [first[c], first[c+1])
 //   u64 칸마다 자료 위치 (칸 수 + 1)개: 칸 c 자료 = [off[c], off[c+1]), 비어 있으면 길이 0
@@ -23,7 +24,8 @@ import 'dem.dart';
 //     u16 위도[n], 경도[n] (칸 남서쪽 모서리에서 백만분의 1도 단위 차이). 칸 안에서는 Z 순서
 //     u32 연결 시작[n+1]               갈림길 i의 연결 = [start[i], start[i+1])
 //     i32 상대 갈림길[m] (내 번호와의 차이), u16 길이[m] (m), u16 오르막[m], u16 내리막[m] (0.1 m),
-//     u8 길 종류[m] (4바이트 맞춤), u32 모양 번호[m]
+//     u8 길 종류[m] (4바이트 맞춤, 아래 6비트 = 종류, 0x80 = 이 방향 통행 금지, 0x40 = 반대 방향 금지: 일방통행),
+//     u32 모양 번호[m]
 //       모양 번호의 맨 윗비트가 1이면 모양이 상대 갈림길 칸에 있고 거꾸로 읽음
 //     u32 모양 시작[g+1] (바이트), u8 중간 점[q]: 모양 주인 갈림길부터 위도·경도 차이를
 //       지그재그 가변 길이 정수로 번갈아 (양 끝 갈림길 제외)
@@ -87,6 +89,72 @@ int? wayClass(Map<String, dynamic> tags) {
   return null; // motorway, construction, proposed, platform, corridor, elevator, via_ferrata ...
 }
 
+// ---------------- 자동차 ----------------
+
+/// 자동차 길 종류 (자동차 자료에서 길 종류 번호의 뜻)
+abstract final class CarClass {
+  static const motorway = 0, motorwayLink = 1, trunk = 2, primary = 3, secondary = 4, tertiary = 5, minor = 6;
+  static const service = 7;
+  static const count = 8;
+}
+
+/// 길 종류별 어림 속도 (km/h). 실시간 교통은 모름
+const carSpeedKmh = [100.0, 60.0, 80.0, 60.0, 50.0, 40.0, 25.0, 15.0];
+const carClassLabel = ['고속도로', '고속도로 나들목', '국도·자동차 전용도로', '큰 도로', '지방 도로', '작은 도로', '골목·마을길', '이면도로'];
+
+/// 일방통행: 0 양방향, 1 그려진 방향으로만, 2 거꾸로만
+const dirBoth = 0, dirForward = 1, dirBackward = 2;
+
+/// OpenStreetMap 태그로 자동차 길 종류와 일방통행을 정함. 차가 못 다니는 길은 null
+(int, int)? carWay(Map<String, dynamic> tags) {
+  String? t(String k) => tags[k]?.toString();
+  final hw = t('highway');
+  if (hw == null || t('area') == 'yes') return null;
+  // 차 통행 금지 (차 종류별 태그가 있으면 그것을, 없으면 access를 봄)
+  const closed = {'no', 'private', 'agricultural', 'forestry'};
+  if (closed.contains(t('motorcar') ?? t('motor_vehicle') ?? t('vehicle') ?? t('access'))) return null;
+  final cls = switch (hw) {
+    'motorway' => CarClass.motorway,
+    'motorway_link' => CarClass.motorwayLink,
+    'trunk' || 'trunk_link' => CarClass.trunk,
+    'primary' || 'primary_link' => CarClass.primary,
+    'secondary' || 'secondary_link' => CarClass.secondary,
+    'tertiary' || 'tertiary_link' => CarClass.tertiary,
+    'unclassified' || 'residential' || 'living_street' || 'road' => CarClass.minor,
+    'service' when t('service') != 'parking_aisle' && t('service') != 'drive-through' => CarClass.service,
+    _ => null,
+  };
+  if (cls == null) return null;
+  final o = t('oneway');
+  final roundabout = t('junction') == 'roundabout' || t('junction') == 'circular';
+  final dir = switch (o) {
+    'yes' || 'true' || '1' => dirForward,
+    '-1' || 'reverse' => dirBackward,
+    'no' || 'false' || '0' => dirBoth,
+    _ => hw == 'motorway' || hw == 'motorway_link' || roundabout ? dirForward : dirBoth,
+  };
+  return (cls, dir);
+}
+
+/// 길 찾는 방법
+enum RouteMode {
+  walk, // 걷기 (길찾기 자료)
+  car, // 자동차, 고속도로 이용 (자동차 자료)
+  carNoHighway; // 자동차, 고속도로 없이 국도·일반도로로
+
+  bool get isCar => this != walk;
+}
+
+double _carSeconds(double len, int cls) => len / (carSpeedKmh[cls] / 3.6);
+
+/// 연결 하나의 비용 (초 단위 어림). 갈 수 없으면 무한대
+double modeCost(RouteMode mode, double len, double up, double down, int cls) => switch (mode) {
+      RouteMode.walk => edgeCost(len, up, down, cls),
+      RouteMode.car => _carSeconds(len, cls),
+      RouteMode.carNoHighway =>
+        cls == CarClass.motorway || cls == CarClass.motorwayLink ? double.infinity : _carSeconds(len, cls),
+    };
+
 double _distM(double lat1, double lon1, double lat2, double lon2) {
   const r = 6371008.8;
   final p1 = lat1 * pi / 180, p2 = lat2 * pi / 180;
@@ -110,7 +178,7 @@ class RouteGraphBuilder {
   final double? Function(double lat, double lon)? elevation;
   RouteGraphBuilder(this.west, this.south, this.east, this.north, {this.elevation});
 
-  final _cls = <int>[];
+  final _cls = <int>[], _dir = <int>[];
   final _ways = <Int32List>[]; // 위도, 경도 번갈아 (백만분의 1도)
   final _uses = HashMap<int, int>(); // 점 -> 쓰인 횟수 (2 이상이면 갈림길)
 
@@ -118,8 +186,8 @@ class RouteGraphBuilder {
 
   int get ways => _ways.length;
 
-  /// 길 하나 추가: [coords] = [[경도, 위도], ...] (GeoJSON 순서)
-  void addWay(int cls, List<List<num>> coords) {
+  /// 길 하나 추가: [coords] = [[경도, 위도], ...] (GeoJSON 순서), [dir] 일방통행 (dirBoth/dirForward/dirBackward)
+  void addWay(int cls, List<List<num>> coords, {int dir = dirBoth}) {
     final pts = <int>[];
     for (final c in coords) {
       final lat = (c[1] * 1e6).round(), lon = (c[0] * 1e6).round();
@@ -130,6 +198,7 @@ class RouteGraphBuilder {
     final w = Int32List.fromList(pts);
     _ways.add(w);
     _cls.add(cls);
+    _dir.add(dir);
     final n = w.length ~/ 2;
     for (var i = 0; i < n; i++) {
       final k = _key(w[2 * i], w[2 * i + 1]);
@@ -214,8 +283,8 @@ class RouteGraphBuilder {
     return [for (var i = 0; i < n; i++) if (keep[i]) ...[pts[2 * i], pts[2 * i + 1]]];
   }
 
-  /// 파일로 저장하고 (갈림길 수, 연결 수) 를 돌려줌
-  (int, int) write(String path) {
+  /// 파일로 저장하고 (갈림길 수, 연결 수) 를 돌려줌. [car]면 자동차 자료로 표시
+  (int, int) write(String path, {bool car = false}) {
     final w0 = (west * 1e6).round(), s0 = (south * 1e6).round(), step = (routeCellDeg * 1e6).round();
     final nx = ((east - west) / routeCellDeg).ceil(), ny = ((north - south) / routeCellDeg).ceil();
     // 칸 나누기는 정수로 (갈림길 위치를 칸 모서리에서의 차이 u16으로 정확히 저장하려고)
@@ -223,7 +292,8 @@ class RouteGraphBuilder {
         ((lat - s0) ~/ step).clamp(0, ny - 1) * nx + ((lon - w0) ~/ step).clamp(0, nx - 1);
 
     // 1. 길을 갈림길마다 잘라 연결로 만듦
-    final eA = <int>[], eB = <int>[], eCls = <int>[], eLen = <double>[], eUp = <double>[], eDown = <double>[];
+    final eA = <int>[], eB = <int>[], eCls = <int>[], eDir = <int>[], eLen = <double>[], eUp = <double>[];
+    final eDown = <double>[];
     final eMid = <Int32List>[];
     for (var w = 0; w < _ways.length; w++) {
       final pts = _ways[w];
@@ -244,6 +314,7 @@ class RouteGraphBuilder {
           eA.add(a);
           eB.add(k);
           eCls.add(_cls[w]);
+          eDir.add(_dir[w]);
           eLen.add(len);
           eUp.add(up);
           eDown.add(down);
@@ -254,6 +325,7 @@ class RouteGraphBuilder {
     }
     _ways.clear();
     _uses.clear();
+    _dir.clear();
     int latOf(int k) => k >> 28;
     int lonOf(int k) => k & ((1 << 28) - 1);
 
@@ -274,6 +346,7 @@ class RouteGraphBuilder {
         final a = eA[e];
         eA[e] = eB[e];
         eB[e] = a;
+        eDir[e] = const [dirBoth, dirBackward, dirForward][eDir[e]];
         final u = eUp[e];
         eUp[e] = eDown[e];
         eDown[e] = u;
@@ -288,6 +361,7 @@ class RouteGraphBuilder {
       if (eB[e1] != k) flip(e1);
       if (eA[e2] != k) flip(e2);
       if (eA[e1] == eB[e2]) continue; // 합치면 제자리로 돌아오는 고리
+      if (eDir[e1] != eDir[e2]) continue; // 일방통행이 다르면 따로
       eMid[e1] = Int32List.fromList([...eMid[e1], latOf(k), lonOf(k), ...eMid[e2]]);
       eB[e1] = eB[e2];
       eLen[e1] += eLen[e2];
@@ -446,8 +520,11 @@ class RouteGraphBuilder {
         final e = x ~/ 2;
         u16(dm(x.isEven ? eDown[e] : eUp[e]));
       }
+      // 일방통행: 이 갈림길에서 이 연결로 나가는 방향(0x80)·들어오는 방향(0x40)이 막혔는지
       for (final x in flat) {
-        bd.setUint8(o++, eCls[x ~/ 2]);
+        final e = x ~/ 2, d = eDir[e];
+        final out = x.isEven ? d == dirBackward : d == dirForward, inn = x.isEven ? d == dirForward : d == dirBackward;
+        bd.setUint8(o++, eCls[e] | (out ? 0x80 : 0) | (inn ? 0x40 : 0));
       }
       o = pad4(o);
       for (final x in flat) {
@@ -466,6 +543,7 @@ class RouteGraphBuilder {
       head.setUint8(i, routeMagic.codeUnitAt(i));
     }
     head.setUint16(4, routeVersion, Endian.little);
+    head.setUint16(6, car ? 1 : 0, Endian.little);
     head.setFloat64(8, w0 / 1e6, Endian.little);
     head.setFloat64(16, s0 / 1e6, Endian.little);
     head.setFloat64(24, step / 1e6, Endian.little);
@@ -499,9 +577,9 @@ class _Cell {
   final Uint16List dLat, dLon, len, up, down;
   final Uint32List start, geom, gStart;
   final Int32List dTo;
-  final Uint8List cls, pts;
+  final Uint8List cls, flags, pts; // flags: 0x80 이 방향 금지, 0x40 반대 방향 금지 (일방통행)
   _Cell(this.first, this.lat0, this.lon0, this.dLat, this.dLon, this.start, this.dTo, this.len, this.up, this.down,
-      this.cls, this.geom, this.gStart, this.pts);
+      this.cls, this.flags, this.geom, this.gStart, this.pts);
 
   int get count => dLat.length;
   int latE6(int i) => lat0 + dLat[i];
@@ -528,12 +606,17 @@ class _Cell {
     final len = take((x) => b.asUint16List(x, m), 2 * m);
     final up = take((x) => b.asUint16List(x, m), 2 * m);
     final down = take((x) => b.asUint16List(x, m), 2 * m);
-    final cls = take((x) => b.asUint8List(x, m), 0);
+    final raw8 = take((x) => b.asUint8List(x, m), 0);
+    final cls = Uint8List(m), flags = Uint8List(m);
+    for (var k = 0; k < m; k++) {
+      cls[k] = raw8[k] & 0x3f;
+      flags[k] = raw8[k] & 0xc0;
+    }
     o = pad4(o + m);
     final geom = take((x) => b.asUint32List(x, m), 4 * m);
     final gStart = take((x) => b.asUint32List(x, g + 1), 4 * (g + 1));
     final pts = take((x) => b.asUint8List(x, q), q);
-    return _Cell(first, lat0, lon0, dLat, dLon, start, dTo, len, up, down, cls, geom, gStart, pts);
+    return _Cell(first, lat0, lon0, dLat, dLon, start, dTo, len, up, down, cls, flags, geom, gStart, pts);
   }
 }
 
@@ -543,9 +626,11 @@ class RouteGraph {
   final int nx, ny, nodes;
   final Uint32List _first;
   final List<int> _offs;
+  final bool car; // 자동차 자료
   final _cells = HashMap<int, _Cell?>();
 
-  RouteGraph._(this._f, this.west, this.south, this.cell, this.nx, this.ny, this.nodes, this._first, this._offs);
+  RouteGraph._(this._f, this.west, this.south, this.cell, this.nx, this.ny, this.nodes, this._first, this._offs,
+      this.car);
 
   static RouteGraph open(String path) {
     final f = File(path).openSync();
@@ -567,7 +652,8 @@ class RouteGraph {
     }
     final offs = [for (var c = 0; c <= cells; c++) t.getUint64(4 * (cells + 1) + 8 * c, Endian.little)];
     return RouteGraph._(f, h.getFloat64(8, Endian.little), h.getFloat64(16, Endian.little),
-        h.getFloat64(24, Endian.little), nx, ny, h.getUint32(40, Endian.little), first, offs);
+        h.getFloat64(24, Endian.little), nx, ny, h.getUint32(40, Endian.little), first, offs,
+        h.getUint16(6, Endian.little) == 1);
   }
 
   void close() => _f.closeSync();
@@ -656,10 +742,13 @@ class FoundRoute {
   final List<double> byClass; // 길 종류별 거리 (m)
   final double startGap, endGap; // 출발·도착점에서 가장 가까운 길까지 (m)
   final int searched; // 살펴본 갈림길 수
-  const FoundRoute(this.pts, this.length, this.up, this.down, this.byClass, this.startGap, this.endGap, this.searched);
+  final RouteMode mode;
+  final double seconds; // 자동차: 길 종류별 어림 속도로 걸리는 시간 (걷기는 0, 걷는 시간은 walkTime으로)
+  const FoundRoute(this.pts, this.length, this.up, this.down, this.byClass, this.startGap, this.endGap, this.searched,
+      {this.mode = RouteMode.walk, this.seconds = 0});
 
-  /// "큰 도로 1.2 km" 처럼 피하고 싶은 길이 섞였는지 (100 m 이상만)
-  List<String> get warnings => [
+  /// "큰 도로 1.2 km" 처럼 피하고 싶은 길이 섞였는지 (100 m 이상만, 걷기만)
+  List<String> get warnings => mode.isCar ? const [] : [
         for (final c in [WayClass.trunk, WayClass.primary, WayClass.alpineTrail, WayClass.hardTrail])
           if (byClass[c] >= 100) '${classLabel[c]} ${byClass[c] < 1000 ? '${byClass[c].round()} m' : '${(byClass[c] / 1000).toStringAsFixed(1)} km'}'
       ];
@@ -674,9 +763,9 @@ class _Snap {
   final (double, double) at;
   final double frac, gap; // 연결 처음부터 비율, 길까지 거리
   final double len, up, down;
-  final int cls;
+  final int cls, flags; // flags: node -> other 금지 0x80, other -> node 금지 0x40
   _Snap(this.node, this.k, this.other, this.shape, this.seg, this.at, this.frac, this.gap, this.len, this.up, this.down,
-      this.cls);
+      this.cls, this.flags);
 
   /// node 쪽으로 가는 부분 모양 (이 점 -> node)
   List<(double, double)> get toNode => [at, ...shape.sublist(0, seg + 1).reversed];
@@ -685,7 +774,8 @@ class _Snap {
   List<(double, double)> get toOther => [at, ...shape.sublist(seg + 1)];
 }
 
-_Snap? _snap(RouteGraph g, double lat, double lon, double maxGap) {
+/// [skip]: 이 종류의 길에는 붙이지 않음 (고속도로 피하기)
+_Snap? _snap(RouteGraph g, double lat, double lon, double maxGap, {bool Function(int cls)? skip}) {
   final c0 = g.cellAt(lat, lon);
   if (c0 == null) return null;
   final mLat = 111320.0, mLon = 111320.0 * cos(lat * pi / 180);
@@ -701,6 +791,7 @@ _Snap? _snap(RouteGraph g, double lat, double lon, double maxGap) {
       for (var i = 0; i < cell.count; i++) {
         for (var k = cell.start[i]; k < cell.start[i + 1]; k++) {
           if (cell.geom[k] & _rev != 0) continue; // 연결마다 한 번만 (모양을 가진 쪽에서)
+          if (skip != null && skip(cell.cls[k])) continue;
           final node = cell.first + i;
           final shape = g.edgeShape(node, k);
           // 빠른 거르기: 연결 전체가 지금 최선보다 멀면 건너뜀
@@ -731,7 +822,7 @@ _Snap? _snap(RouteGraph g, double lat, double lon, double maxGap) {
               best = d;
               final at = (shape[j].$1 + (shape[j + 1].$1 - shape[j].$1) * t, shape[j].$2 + (shape[j + 1].$2 - shape[j].$2) * t);
               out = _Snap(node, k, cell.to(i, k), shape, j, at, total == 0 ? 0 : (along + segLen[j] * t) / total, d,
-                  cell.len[k].toDouble(), cell.up[k] / 10, cell.down[k] / 10, cell.cls[k]);
+                  cell.len[k].toDouble(), cell.up[k] / 10, cell.down[k] / 10, cell.cls[k], cell.flags[k]);
             }
             along += segLen[j];
           }
@@ -793,10 +884,16 @@ typedef _Part = (List<(double, double)>, double, double, double, int);
 
 /// [lat1],[lon1]에서 [lat2],[lon2]까지 걷기 좋은 길. 근처에 길이 없거나 이어지지 않으면 RouteException
 FoundRoute findRoute(RouteGraph g, double lat1, double lon1, double lat2, double lon2,
-    {DemFile? dem, double maxGap = 1000, int maxSearch = 1500000}) {
-  final s = _snap(g, lat1, lon1, maxGap);
+    {DemFile? dem, double maxGap = 1000, int maxSearch = 1500000, RouteMode mode = RouteMode.walk}) {
+  if (mode.isCar != g.car) {
+    throw RouteException(mode.isCar ? '자동차 길찾기 자료가 아닙니다' : '걷기 길찾기 자료가 아닙니다');
+  }
+  double cost(double len, double up, double down, int cls) => modeCost(mode, len, up, down, cls);
+  bool noHighway(int cls) => cls == CarClass.motorway || cls == CarClass.motorwayLink;
+  final skip = mode == RouteMode.carNoHighway ? noHighway : null;
+  final s = _snap(g, lat1, lon1, maxGap, skip: skip);
   if (s == null) throw RouteException('지금 위치 ${maxGap.round()} m 안에 길이 없습니다');
-  final t = _snap(g, lat2, lon2, maxGap);
+  final t = _snap(g, lat2, lon2, maxGap, skip: skip);
   if (t == null) throw RouteException('목적지 ${maxGap.round()} m 안에 길이 없습니다');
 
   // 가상 연결: 출발점 -> 양쪽 갈림길, 양쪽 갈림길 -> 도착점, 같은 길 위면 출발 -> 도착 바로
@@ -810,10 +907,17 @@ FoundRoute findRoute(RouteGraph g, double lat1, double lon1, double lat2, double
         : (shape, x.len * f, up, down, x.cls);
   }
 
-  final fromEdges = <int, _Part>{s.node: part(s, true), s.other: part(s, false)};
-  final toGoal = <int, _Part>{t.node: part(t, true, reverse: true), t.other: part(t, false, reverse: true)};
+  // 일방통행: 출발점에서 node 쪽으로 가는 것은 other -> node 방향 (0x40), other 쪽은 node -> other (0x80)
+  final fromEdges = <int, _Part>{
+    if (s.flags & 0x40 == 0) s.node: part(s, true),
+    if (s.flags & 0x80 == 0) s.other: part(s, false),
+  };
+  final toGoal = <int, _Part>{
+    if (t.flags & 0x80 == 0) t.node: part(t, true, reverse: true),
+    if (t.flags & 0x40 == 0) t.other: part(t, false, reverse: true),
+  };
   _Part? direct;
-  if (s.node == t.node && s.k == t.k) {
+  if (s.node == t.node && s.k == t.k && s.flags & (t.frac >= s.frac ? 0x80 : 0x40) == 0) {
     final a = s.frac, b = t.frac;
     final f = (b - a).abs();
     final forward = b >= a;
@@ -828,20 +932,23 @@ FoundRoute findRoute(RouteGraph g, double lat1, double lon1, double lat2, double
   final mLat = 111320.0, mLon = 111320.0 * cos(lat2 * pi / 180);
   double h(double lat, double lon) {
     final dx = (lon - t.at.$2) * mLon, dy = (lat - t.at.$1) * mLat;
-    return sqrt(dx * dx + dy * dy) / _speed;
+    // 남은 직선거리를 가장 빠른 속도로 간다고 어림 (실제보다 작아야 가장 좋은 길을 찾음)
+    return sqrt(dx * dx + dy * dy) /
+        switch (mode) { RouteMode.walk => _speed, RouteMode.car => 100 / 3.6, RouteMode.carNoHighway => 80 / 3.6 };
   }
 
-  final cost = HashMap<int, double>()..[_from] = 0;
+  final best = HashMap<int, double>()..[_from] = 0;
   final prev = HashMap<int, int>(); // 갈림길 -> 이전 갈림길
   final via = HashMap<int, int>(); // 갈림길 -> 이전 갈림길의 연결 번호 (가상 연결이면 -1)
   final done = HashSet<int>();
   final heap = _Heap()..push(h(s.at.$1, s.at.$2), _from);
 
   void relax(int u, int v, double c, int edge, double vLat, double vLon) {
-    final nc = cost[u]! + c;
-    final old = cost[v];
+    if (c == double.infinity) return;
+    final nc = best[u]! + c;
+    final old = best[v];
     if (old != null && old <= nc) return;
-    cost[v] = nc;
+    best[v] = nc;
     prev[v] = u;
     via[v] = edge;
     heap.push(nc + (v == _goal ? 0 : h(vLat, vLon)), v);
@@ -860,20 +967,21 @@ FoundRoute findRoute(RouteGraph g, double lat1, double lon1, double lat2, double
       for (final e in fromEdges.entries) {
         final p = e.value;
         final (la, lo) = g.nodePos(e.key);
-        relax(u, e.key, edgeCost(p.$2, p.$3, p.$4, p.$5), -1, la, lo);
+        relax(u, e.key, cost(p.$2, p.$3, p.$4, p.$5), -1, la, lo);
       }
-      if (direct != null) relax(u, _goal, edgeCost(direct.$2, direct.$3, direct.$4, direct.$5), -1, 0, 0);
+      if (direct != null) relax(u, _goal, cost(direct.$2, direct.$3, direct.$4, direct.$5), -1, 0, 0);
       continue;
     }
     final c = g._cellFor(u), i = u - c.first;
     for (var k = c.start[i]; k < c.start[i + 1]; k++) {
+      if (c.flags[k] & 0x80 != 0) continue; // 일방통행 반대 방향
       final v = c.to(i, k);
       if (done.contains(v)) continue;
       final (la, lo) = g.nodePos(v);
-      relax(u, v, edgeCost(c.len[k].toDouble(), c.up[k] / 10, c.down[k] / 10, c.cls[k]), k, la, lo);
+      relax(u, v, cost(c.len[k].toDouble(), c.up[k] / 10, c.down[k] / 10, c.cls[k]), k, la, lo);
     }
     final p = toGoal[u];
-    if (p != null) relax(u, _goal, edgeCost(p.$2, p.$3, p.$4, p.$5), -1, 0, 0);
+    if (p != null) relax(u, _goal, cost(p.$2, p.$3, p.$4, p.$5), -1, 0, 0);
   }
   if (!found) throw const RouteException('길이 이어져 있지 않습니다 (섬·막힌 길)');
 
@@ -884,11 +992,12 @@ FoundRoute findRoute(RouteGraph g, double lat1, double lon1, double lat2, double
   }
   final order = chain.reversed.toList();
   final pts = <(double, double)>[];
-  var length = 0.0, up = 0.0, down = 0.0;
-  final byClass = List<double>.filled(WayClass.count, 0);
+  var length = 0.0, up = 0.0, down = 0.0, seconds = 0.0;
+  final byClass = List<double>.filled(max(WayClass.count, CarClass.count), 0);
   void add(List<(double, double)> shape, double len, double u2, double d2, int cls) {
     pts.addAll(pts.isEmpty ? shape : shape.skip(1));
     length += len;
+    if (mode.isCar) seconds += _carSeconds(len, cls);
     up += u2;
     down += d2;
     byClass[cls] += len;
@@ -910,12 +1019,13 @@ FoundRoute findRoute(RouteGraph g, double lat1, double lon1, double lat2, double
     add(p.$1, p.$2, p.$3, p.$4, p.$5);
   }
   return FoundRoute([for (final (la, lo) in pts) (la, lo, dem?.elevation(la, lo))], length, up, down, byClass, s.gap,
-      t.gap, done.length);
+      t.gap, done.length,
+      mode: mode, seconds: seconds);
 }
 
 /// 별도 스레드에서 파일을 열어 길을 찾음 (화면이 멈추지 않게)
 Future<FoundRoute> findRouteInBackground(String graphPath, String? demPath, double lat1, double lon1, double lat2,
-        double lon2) =>
+        double lon2, {RouteMode mode = RouteMode.walk}) =>
     Isolate.run(() {
       final g = RouteGraph.open(graphPath);
       DemFile? dem;
@@ -923,7 +1033,7 @@ Future<FoundRoute> findRouteInBackground(String graphPath, String? demPath, doub
         if (demPath != null) dem = DemFile.open(demPath);
       } catch (_) {}
       try {
-        return findRoute(g, lat1, lon1, lat2, lon2, dem: dem);
+        return findRoute(g, lat1, lon1, lat2, lon2, dem: dem, mode: mode);
       } finally {
         g.close();
         dem?.close();

@@ -1561,7 +1561,7 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
 
 /// 카탈로그를 나라별로 묶음: "kr", "kr-terrain", "kr-labels", "kr-dem" -> 대한민국 하나
 List<List<MapPack>> bundleCatalog(List<MapPack> catalog) {
-  const order = ['basemap', 'terrain', 'hillshade', 'labels', 'dem', 'routes', 'address'];
+  const order = ['basemap', 'terrain', 'hillshade', 'labels', 'dem', 'routes', 'drive', 'address'];
   final groups = <String, List<MapPack>>{};
   for (final p in catalog) {
     groups.putIfAbsent(p.id.split('-').first, () => []).add(p);
@@ -1628,6 +1628,7 @@ String partLabel(MapPack p) => switch (p.kind) {
       'hillshade' => '산 그림자',
       'dem' => '지형 분석',
       'routes' => '길찾기',
+      'drive' => '자동차 길찾기',
       'address' => '주소 검색',
       _ => p.name,
     };

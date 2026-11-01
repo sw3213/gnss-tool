@@ -15,7 +15,7 @@ import 'analysis.dart';
 import 'main.dart';
 import 'nav.dart';
 import 'offline_map.dart';
-import 'routing.dart' show RouteException, findRouteInBackground;
+import 'routing.dart' show CarClass, RouteException, RouteMode, findRouteInBackground;
 import 'search_page.dart';
 import 'updater.dart';
 import 'voice.dart';
@@ -130,7 +130,8 @@ class _MainScreenState extends State<MainScreen> {
         content: Text('경로 이탈 ${distanceLabel(i.off)} — 경로는 ${directionLabel(i.toRoute)} 쪽'),
         action: widget.route.target == null
             ? null
-            : SnackBarAction(label: '다시 찾기', onPressed: () => _findRoute(widget.route.target!)),
+            : SnackBarAction(
+                label: '다시 찾기', onPressed: () => _findRoute(widget.route.target!, mode: widget.route.mode)),
       ));
     }
     _wasOff = i.offRoute;
@@ -157,8 +158,9 @@ class _MainScreenState extends State<MainScreen> {
 
   bool _routing = false;
 
-  /// 현재 위치에서 [t]까지 길 따라 경로를 찾아 "경로 따라가기"로 안내 (직선 안내는 끝냄)
-  Future<void> _findRoute(NavTarget t) async {
+  /// 현재 위치에서 [t]까지 길 따라 경로를 찾아 "경로 따라가기"로 안내 (직선 안내는 끝냄).
+  /// [mode]: 걷기 / 자동차(고속도로 이용) / 자동차(고속도로 없이)
+  Future<void> _findRoute(NavTarget t, {RouteMode mode = RouteMode.walk}) async {
     final messenger = ScaffoldMessenger.of(context);
     final s = widget.snap.value;
     if (s.lat == null || s.lon == null || s.fixQ == 0) {
@@ -171,10 +173,12 @@ class _MainScreenState extends State<MainScreen> {
       return p == null ? null : store.fileOf(p.id);
     }
 
-    final graph = pathOf('routes');
+    final graph = pathOf(mode.isCar ? 'drive' : 'routes');
     if (graph == null) {
       messenger.showSnackBar(SnackBar(
-        content: const Text('길찾기에는 "대한민국 길찾기" 자료가 필요합니다'),
+        content: Text(mode.isCar
+            ? '자동차 길찾기에는 "대한민국 자동차 길찾기" 자료가 필요합니다'
+            : '길찾기에는 "대한민국 길찾기" 자료가 필요합니다'),
         action: SnackBarAction(
           label: '받기',
           onPressed: () =>
@@ -187,19 +191,31 @@ class _MainScreenState extends State<MainScreen> {
     _routing = true;
     messenger.showSnackBar(const SnackBar(content: Text('길 찾는 중…'), duration: Duration(minutes: 1)));
     try {
-      final r = await findRouteInBackground(graph, pathOf('dem'), s.lat!, s.lon!, t.lat, t.lon);
+      final r = await findRouteInBackground(graph, pathOf('dem'), s.lat!, s.lon!, t.lat, t.lon, mode: mode);
       if (!mounted) return;
       await widget.route.start(
-        GpxRoute('길찾기: ${t.name}', [for (final (la, lo, h) in r.pts) TrackPoint(la, lo, h, DateTime(0))]),
+        GpxRoute('${mode.isCar ? '자동차' : '길찾기'}: ${t.name}',
+            [for (final (la, lo, h) in r.pts) TrackPoint(la, lo, h, DateTime(0))]),
         target: t,
+        mode: mode,
+        carSpeed: r.seconds > 0 ? r.length / r.seconds : null,
       );
       widget.guide.stop();
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(SnackBar(
         duration: const Duration(seconds: 8),
         content: Text([
-          '${distanceLabel(r.length)}  ·  걸어서 약 ${durationLabel(walkTime(r.length, r.up))}',
-          '오르막 ${r.up.round()} m · 내리막 ${r.down.round()} m',
+          if (mode.isCar) ...[
+            '${distanceLabel(r.length)}  ·  차로 약 ${durationLabel(Duration(seconds: r.seconds.round()))}',
+            if (r.byClass[CarClass.motorway] + r.byClass[CarClass.motorwayLink] >= 100)
+              '고속도로 ${distanceLabel(r.byClass[CarClass.motorway] + r.byClass[CarClass.motorwayLink])} 포함'
+            else
+              '고속도로 없이',
+            '실시간 교통은 반영되지 않습니다',
+          ] else ...[
+            '${distanceLabel(r.length)}  ·  걸어서 약 ${durationLabel(walkTime(r.length, r.up))}',
+            '오르막 ${r.up.round()} m · 내리막 ${r.down.round()} m',
+          ],
           if (r.warnings.isNotEmpty) '피할 수 없는 구간: ${r.warnings.join(', ')}',
           if (r.startGap > 50) '가장 가까운 길까지 ${distanceLabel(r.startGap)} 먼저 이동',
         ].join('\n')),
@@ -354,12 +370,30 @@ class _MainScreenState extends State<MainScreen> {
             ]),
           ),
           ListTile(
-            leading: const Icon(Icons.alt_route),
-            title: const Text('길 따라 안내'),
+            leading: const Icon(Icons.directions_walk),
+            title: const Text('걸어서 길 안내'),
             subtitle: const Text('도로·등산로를 따라, 오르막과 큰 차도는 피해서'),
             onTap: () {
               Navigator.pop(ctx);
               _findRoute(NavTarget(name ?? '선택한 곳', lat, lon));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.directions_car),
+            title: const Text('차로 안내 (고속도로 이용)'),
+            subtitle: const Text('빠른 길, 일방통행 지킴'),
+            onTap: () {
+              Navigator.pop(ctx);
+              _findRoute(NavTarget(name ?? '선택한 곳', lat, lon), mode: RouteMode.car);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.directions_car_outlined),
+            title: const Text('차로 안내 (고속도로 없이)'),
+            subtitle: const Text('국도·일반도로로'),
+            onTap: () {
+              Navigator.pop(ctx);
+              _findRoute(NavTarget(name ?? '선택한 곳', lat, lon), mode: RouteMode.carNoHighway);
             },
           ),
           ListTile(
@@ -1573,8 +1607,8 @@ class _RouteCard extends StatelessWidget {
                                         '${distanceLabel(i.toNext!)} 앞 ${turnWord(i.next!.angle)}'
                                       else
                                         '진행 방향 ${directionLabel(i.ahead)}',
-                                      '걸어서 약 ${durationLabel(i.walk)}',
-                                      if (i.climbLeft >= 10) '남은 오르막 ${i.climbLeft.round()} m',
+                                      route.timeLabel(i),
+                                      if (i.climbLeft >= 10 && route.carSpeed == null) '남은 오르막 ${i.climbLeft.round()} m',
                                     ].join('  ·  '),
                               style: sub,
                             ),

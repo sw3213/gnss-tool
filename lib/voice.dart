@@ -39,7 +39,8 @@ String speechDistance(double m) =>
 
 /// 경로 정보가 바뀔 때마다 할 말을 정함 (말하기와 분리해 테스트 가능)
 class VoiceAnnouncer {
-  static const farM = 120.0, nearM = 30.0; // 미리 알림 / 지금 꺾으라는 알림 거리
+  // 미리 알림 / 지금 꺾으라는 알림 거리: 걷기, 자동차 (빨리 가니 더 일찍)
+  static const farM = 120.0, nearM = 30.0, carFarM = 400.0, carNearM = 80.0;
   static const offRepeat = Duration(seconds: 90); // 이탈 중이면 이만큼마다 다시 알림
 
   GpxRoute? _route;
@@ -47,8 +48,8 @@ class VoiceAnnouncer {
   final _far = <double>{}, _near = <double>{}; // 이미 알린 꺾는 곳 (RouteTurn.at)
   DateTime _offAt = DateTime(0);
 
-  /// [hasTarget]: 길찾기로 만든 경로라 "다시 찾기"가 가능한지
-  List<String> update(GpxRoute? r, RouteInfo? i, {bool hasTarget = false, DateTime? now}) {
+  /// [hasTarget]: 길찾기로 만든 경로라 "다시 찾기"가 가능한지, [carSpeed]: 자동차 경로의 평균 속도 (m/s)
+  List<String> update(GpxRoute? r, RouteInfo? i, {bool hasTarget = false, DateTime? now, double? carSpeed}) {
     now ??= DateTime.now();
     if (!identical(r, _route)) {
       _route = r;
@@ -60,7 +61,10 @@ class VoiceAnnouncer {
     final out = <String>[];
     if (!_started) {
       _started = true;
-      out.add('경로 안내를 시작합니다. 목적지까지 ${speechDistance(i.left)}, 걸어서 약 ${durationLabel(i.walk)}입니다.');
+      final time = carSpeed == null || carSpeed <= 0
+          ? '걸어서 약 ${durationLabel(i.walk)}'
+          : '차로 약 ${durationLabel(Duration(seconds: (i.left / carSpeed).round()))}';
+      out.add('경로 안내를 시작합니다. 목적지까지 ${speechDistance(i.left)}, $time입니다.');
     }
     if (i.finished) {
       _done = true;
@@ -82,7 +86,8 @@ class VoiceAnnouncer {
     }
     final t = i.next, d = i.toNext;
     if (t == null || d == null) return out;
-    if (d <= nearM) {
+    final car = carSpeed != null;
+    if (d <= (car ? carNearM : nearM)) {
       if (_near.add(t.at)) {
         _far.add(t.at);
         final after = r.turns.where((x) => x.at > t.at).firstOrNull;
@@ -91,7 +96,7 @@ class VoiceAnnouncer {
             ? '${_go(t.angle)} 간 뒤, 바로 ${_go(after.angle)} 가세요.'
             : '${_go(t.angle)} 가세요.${gap >= 300 ? ' 그다음 ${speechDistance(gap)} 쭉 가세요.' : ''}');
       }
-    } else if (d <= farM && _far.add(t.at)) {
+    } else if (d <= (car ? carFarM : farM) && _far.add(t.at)) {
       out.add('${speechDistance(d)} 앞에서 ${_go(t.angle)} 가세요.');
     }
     return out;
@@ -117,7 +122,8 @@ class VoiceGuide {
   }
 
   void _tick() {
-    for (final s in _a.update(route.route.value, route.info.value, hasTarget: route.target != null)) {
+    for (final s in _a.update(route.route.value, route.info.value,
+        hasTarget: route.target != null, carSpeed: route.carSpeed)) {
       Voice.instance.speak(s);
     }
   }

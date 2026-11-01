@@ -5,6 +5,8 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'routing.dart' show RouteMode;
+
 // ============================================================
 // 길 찾기 기본: 거리·방위, 이동 기록(트랙), 저장한 지점(웨이포인트), 일출·일몰
 // ============================================================
@@ -34,8 +36,11 @@ String directionLabel(double deg) => '${_dirs[((deg + 22.5) % 360 ~/ 45)]} ${deg
 
 String distanceLabel(double m) => m < 1000 ? '${m.round()} m' : '${(m / 1000).toStringAsFixed(m < 10000 ? 2 : 1)} km';
 
+/// "1시간 5분", "12분", "1분 미만" (분은 반올림)
 String durationLabel(Duration d) {
-  final h = d.inHours, m = d.inMinutes % 60;
+  final total = (d.inSeconds / 60).round();
+  if (total == 0) return '1분 미만';
+  final h = total ~/ 60, m = total % 60;
   return h > 0 ? '$h시간 $m분' : '$m분';
 }
 
@@ -455,30 +460,54 @@ class RouteFollow {
   final route = ValueNotifier<GpxRoute?>(null);
   final info = ValueNotifier<RouteInfo?>(null);
   NavTarget? target; // 길찾기로 만든 경로의 목적지 (벗어나면 다시 찾기)
+  RouteMode mode = RouteMode.walk; // 걷기 / 자동차 (다시 찾을 때 같은 방법으로)
+  double? carSpeed; // 자동차 경로의 평균 속도 (m/s, 남은 시간 계산), 걷기면 null
 
   Future<File> _file() async => File('${(await _dataDir('guide')).path}/route.gpx');
+  Future<File> _modeFile() async => File('${(await _dataDir('guide')).path}/route_mode.json');
 
   Future<void> load() async {
     try {
       final f = await _file();
       if (f.existsSync()) route.value = parseGpx(await f.readAsString(), '경로');
+      final m = await _modeFile();
+      if (m.existsSync()) {
+        final j = jsonDecode(await m.readAsString()) as Map<String, dynamic>;
+        mode = RouteMode.values.byName(j['mode'] as String);
+        carSpeed = (j['carSpeed'] as num?)?.toDouble();
+      }
     } catch (_) {}
   }
 
-  Future<void> start(GpxRoute r, {NavTarget? target}) async {
+  Future<void> start(GpxRoute r, {NavTarget? target, RouteMode mode = RouteMode.walk, double? carSpeed}) async {
     this.target = target;
+    this.mode = mode;
+    this.carSpeed = mode.isCar ? carSpeed : null;
     route.value = r;
     info.value = null;
     await (await _file()).writeAsString(TrackRecorder.toGpx(r.name, r.pts));
+    await (await _modeFile()).writeAsString(jsonEncode({'mode': mode.name, 'carSpeed': this.carSpeed}));
   }
 
   Future<void> stop() async {
     target = null;
+    mode = RouteMode.walk;
+    carSpeed = null;
     route.value = null;
     info.value = null;
-    final f = await _file();
-    if (f.existsSync()) f.deleteSync();
+    for (final f in [await _file(), await _modeFile()]) {
+      if (f.existsSync()) f.deleteSync();
+    }
   }
+
+  /// 남은 시간: 자동차는 평균 속도로, 걷기는 거리·오르막으로
+  Duration timeLeft(RouteInfo i) {
+    final v = carSpeed;
+    return v == null || v <= 0 ? i.walk : Duration(seconds: (i.left / v).round());
+  }
+
+  /// "걸어서 약 20분" / "차로 약 12분"
+  String timeLabel(RouteInfo i) => '${carSpeed == null ? '걸어서' : '차로'} 약 ${durationLabel(timeLeft(i))}';
 
   void update(double? lat, double? lon, double? hAcc) {
     final r = route.value;
