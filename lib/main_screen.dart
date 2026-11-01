@@ -9,12 +9,14 @@ import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:maplibre_gl/maplibre_gl.dart' show CameraPosition;
 import 'package:path_provider/path_provider.dart';
 
+import 'address.dart' show SearchHit;
 import 'advice.dart';
 import 'analysis.dart';
 import 'main.dart';
 import 'nav.dart';
 import 'offline_map.dart';
 import 'routing.dart' show RouteException, findRouteInBackground;
+import 'search_page.dart';
 import 'updater.dart';
 import 'voice.dart';
 import 'water.dart' show WaterSource, waterChipLabel;
@@ -211,8 +213,19 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  /// 주소·장소 검색 -> 고른 곳으로 지도를 옮기고 길게 누른 것과 같은 메뉴
+  Future<void> _search() async {
+    final s = widget.snap.value;
+    final ok = s.fixQ > 0;
+    final h = await Navigator.of(context).push<SearchHit>(
+        MaterialPageRoute(builder: (_) => SearchPage(lat: ok ? s.lat : null, lon: ok ? s.lon : null)));
+    if (h == null || !mounted) return;
+    widget.map.showPlace(h.lat, h.lon);
+    _onLongPress(h.lat, h.lon, name: h.title);
+  }
+
   /// 지도를 길게 누른 곳: 거리·고도를 보여 주고 "길 따라 안내" / "직선으로 안내" / "지점으로 저장"
-  void _onLongPress(double lat, double lon) {
+  void _onLongPress(double lat, double lon, {String? name}) {
     final s = widget.snap.value;
     final elev = widget.analysis.elevationAt(lat, lon);
     showModalBottomSheet<void>(
@@ -221,10 +234,14 @@ class _MainScreenState extends State<MainScreen> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(
             leading: const Icon(Icons.push_pin_outlined, color: Colors.redAccent),
-            title: Text(s.lat == null
-                ? '선택한 곳'
-                : '${distanceLabel(distanceM(s.lat!, s.lon!, lat, lon))}  ·  '
-                    '${directionLabel(bearingDeg(s.lat!, s.lon!, lat, lon))}'),
+            title: Text([
+              if (name != null) name,
+              if (s.lat != null)
+                '${distanceLabel(distanceM(s.lat!, s.lon!, lat, lon))}  ·  '
+                    '${directionLabel(bearingDeg(s.lat!, s.lon!, lat, lon))}'
+              else if (name == null)
+                '선택한 곳',
+            ].join('\n')),
             subtitle: Text('${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}'
                 '${elev == null ? '' : '  ·  고도 ${elev.round()} m'}'),
           ),
@@ -234,7 +251,7 @@ class _MainScreenState extends State<MainScreen> {
             subtitle: const Text('도로·등산로를 따라, 오르막과 큰 차도는 피해서'),
             onTap: () {
               Navigator.pop(ctx);
-              _findRoute(NavTarget('선택한 곳', lat, lon));
+              _findRoute(NavTarget(name ?? '선택한 곳', lat, lon));
             },
           ),
           ListTile(
@@ -242,7 +259,7 @@ class _MainScreenState extends State<MainScreen> {
             title: const Text('직선으로 안내'),
             onTap: () {
               Navigator.pop(ctx);
-              _guideTo(NavTarget('선택한 곳', lat, lon));
+              _guideTo(NavTarget(name ?? '선택한 곳', lat, lon));
             },
           ),
           ListTile(
@@ -505,6 +522,12 @@ class _MainScreenState extends State<MainScreen> {
               right: 10,
               bottom: ext * box.maxHeight + 10,
               child: Column(children: [
+                _RoundButton(
+                  tooltip: '주소·장소 검색',
+                  onTap: _search,
+                  child: const Icon(Icons.search, size: 24),
+                ),
+                const SizedBox(height: 10),
                 _RoundButton(
                   tooltip: '지도 레이어',
                   onTap: _showLayers,

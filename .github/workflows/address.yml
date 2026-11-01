@@ -1,0 +1,68 @@
+name: Build address search
+
+# 주소·장소 검색 자료(kr-addr.gad)를 OpenStreetMap 한국 데이터(Geofabrik)에서 만들어 Release "maps"에 올림.
+# 도로명주소(addr:street + addr:housenumber)와 이름 있는 장소. 앱은 kind="address"로 검색.
+# 형식·장소 종류는 lib/address.dart, 만드는 코드는 tool/build_address.dart
+
+on:
+  workflow_dispatch:
+  push: # 형식·장소 종류를 바꾸면 자료도 다시 만듦
+    branches: [main]
+    paths: ['lib/address.dart', 'tool/build_address.dart', '.github/workflows/address.yml']
+  schedule:
+    - cron: '0 7 1 * *' # 매월 1일 (기본 지도 갱신 뒤)
+
+permissions:
+  contents: write
+
+jobs:
+  address:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install osmium
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q osmium-tool jq
+          osmium --version
+
+      - name: Download OpenStreetMap (South Korea)
+        run: |
+          curl -sfL -o kr.osm.pbf https://download.geofabrik.de/asia/south-korea-latest.osm.pbf
+          ls -la kr.osm.pbf
+
+      - name: Addresses and named places -> GeoJSON
+        run: |
+          osmium tags-filter -O -o sel.osm.pbf kr.osm.pbf nwr/addr:housenumber nwr/name
+          osmium export -O -f geojsonseq -o features.geojsons sel.osm.pbf
+          ls -la features.geojsons
+
+      - name: Build index
+        run: |
+          flutter pub get
+          dart run tool/build_address.dart features.geojsons kr-addr.gad
+          ls -la kr-addr.gad
+
+      - name: Publish to release "maps"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          size=$(stat -c %s kr-addr.gad)
+          date=$(date -u +%Y-%m-%d)
+          gh release download maps -p catalog.json -O old.json 2>/dev/null || echo '[]' > old.json
+          jq --arg url "https://github.com/$REPO/releases/download/maps/kr-addr.gad" \
+             --arg date "$date" --argjson size "$size" \
+             '[.[] | select(.kind != "address")] + [{
+                id: "kr-addr", name: "대한민국 주소 검색", kind: "address",
+                bbox: [124.5, 33.0, 132.0, 38.7], url: $url, date: $date, size: $size, maxzoom: 0
+              }]' old.json > catalog.json
+          cat catalog.json
+          gh release upload maps kr-addr.gad catalog.json --clobber

@@ -852,6 +852,12 @@ class MapControl {
     if (_ready) _ctl?.setGeoJsonSource('water', _water);
   }
 
+  /// 검색한 곳으로 지도 옮기기 (내 위치 따라가기는 끔)
+  void showPlace(double lat, double lon) {
+    follow.value = false;
+    _ctl?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), math.max(camera.value?.zoom ?? 16, 16)));
+  }
+
   void recenter(double lat, double lon) {
     follow.value = true;
     _ctl?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), math.max(camera.value?.zoom ?? 15, 15)));
@@ -1430,7 +1436,7 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
 
 /// 카탈로그를 나라별로 묶음: "kr", "kr-terrain", "kr-labels", "kr-dem" -> 대한민국 하나
 List<List<MapPack>> bundleCatalog(List<MapPack> catalog) {
-  const order = ['basemap', 'terrain', 'hillshade', 'labels', 'dem', 'routes'];
+  const order = ['basemap', 'terrain', 'hillshade', 'labels', 'dem', 'routes', 'address'];
   final groups = <String, List<MapPack>>{};
   for (final p in catalog) {
     groups.putIfAbsent(p.id.split('-').first, () => []).add(p);
@@ -1449,5 +1455,6 @@ String partLabel(MapPack p) => switch (p.kind) {
       'hillshade' => '산 그림자',
       'dem' => '지형 분석',
       'routes' => '길찾기',
+      'address' => '주소 검색',
       _ => p.name,
     };
