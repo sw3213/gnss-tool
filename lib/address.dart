@@ -302,29 +302,28 @@ List<SearchHit> searchIndex(Uint8List data, String query, {double? lat, double? 
   // "부산 기장군"처럼 지역을 쳤으면 그 지역만 (맞는 게 하나도 없으면 지역은 무시)
   bool inRegion(String reg) => q.region.every((w) => normalizeName(reg).contains(normalizeName(w)));
   final local = roads.where((r) => inRegion(r.$3)).toList();
-  for (final r in local.isEmpty ? roads : local) {
-    final num = q.number;
-    if (q.road != null && num != null) {
-      final rb = _Reader(read(recsOff + r.$4 * 12, r.$5 * 12));
-      (int, int, double, double)? exact, near;
-      var nearGap = 1 << 30;
-      for (var k = 0; k < r.$5; k++) {
-        final a = rb.u16(), b = rb.u16(), la = rb.i32() / 1e6, lo = rb.i32() / 1e6;
-        if (a == num.$1 && b == num.$2) exact = (a, b, la, lo);
-        // 없는 번지: 같은 쪽(홀짝) 가장 가까운 번지
-        final gap = (a - num.$1).abs() * 2 + (a % 2 == num.$1 % 2 ? 0 : 1000000) + (b == 0 ? 0 : 1);
-        if (gap < nearGap) (nearGap, near) = (gap, (a, b, la, lo));
+  final num = q.number;
+  if (q.road != null && num != null) {
+    // 같은 도로가 지도 칸(약 10 km)마다 나뉘어 있음 -> 가까운 조각끼리(같은 동네) 묶어 한 번만 답함
+    final groups = <List<_Road>>[];
+    for (final r in local.isEmpty ? roads : local) {
+      final g = groups.where((g) => _distM(g.first.$6, g.first.$7, r.$6, r.$7) < 20000).firstOrNull;
+      g == null ? groups.add([r]) : g.add(r);
+    }
+    for (final g in groups) {
+      final recs = <(int, int, double, double)>[];
+      for (final r in g) {
+        final rb = _Reader(read(recsOff + r.$4 * 12, r.$5 * 12));
+        for (var k = 0; k < r.$5; k++) {
+          recs.add((rb.u16(), rb.u16(), rb.i32() / 1e6, rb.i32() / 1e6));
+        }
       }
-      final title = '${r.$2} ${num.$1}${num.$2 == 0 ? '' : '-${num.$2}'}';
-      if (exact != null) {
-        hits.add((0, dist(exact.$3, exact.$4), SearchHit(title, r.$3, exact.$3, exact.$4)));
-      } else if (near != null) {
-        final nn = '${near.$1}${near.$2 == 0 ? '' : '-${near.$2}'}';
-        hits.add((1, dist(near.$3, near.$4),
-            SearchHit(title, '${r.$3.isEmpty ? '' : '${r.$3} · '}이 번지는 없어 가까운 $nn번 위치', near.$3, near.$4,
-                exact: false)));
-      }
-    } else {
+      final region = g.map((r) => r.$3).reduce((x, y) => y.length > x.length ? y : x); // 가장 자세한 지역 이름
+      final h = _houseHit('${g.first.$2} ${_numLabel(num.$1, num.$2)}', region, num, recs);
+      if (h != null) hits.add((h.exact ? 0 : 1, dist(h.lat, h.lon), h));
+    }
+  } else {
+    for (final r in local.isEmpty ? roads : local) {
       hits.add((2 + r.$1, dist(r.$6, r.$7), SearchHit(r.$2, r.$3.isEmpty ? '도로' : '도로 · ${r.$3}', r.$6, r.$7)));
     }
   }
@@ -365,6 +364,40 @@ List<SearchHit> searchIndex(Uint8List data, String query, {double? lat, double? 
     if (out.length >= limit) break;
   }
   return out;
+}
+
+typedef _Road = (int rank, String name, String region, int start, int count, double la, double lo);
+
+String _numLabel(int a, int b) => b == 0 ? '$a' : '$a-$b';
+
+/// 한 도로의 번지들([recs]: 본번, 부번, 위도, 경도)에서 [num] 찾기.
+/// 없으면: 같은 본번 건물 -> 같은 쪽(홀짝) 앞뒤 번지 사이를 번호 비율로 나눈 곳 -> 가장 가까운 번지.
+/// 도로명주소 번호는 도로 시작점부터 거리(10 m마다 2씩)로 매겨서 비율로 나누면 대체로 맞음
+SearchHit? _houseHit(String title, String region, (int, int) num, List<(int, int, double, double)> recs) {
+  if (recs.isEmpty) return null;
+  final pre = region.isEmpty ? '' : '$region · ';
+  final (m, sub) = num;
+  for (final r in recs) {
+    if (r.$1 == m && r.$2 == sub) return SearchHit(title, region, r.$3, r.$4);
+  }
+  final sameMain = recs.where((r) => r.$1 == m).firstOrNull;
+  if (sameMain != null) {
+    return SearchHit(title, '$pre이 번지는 없어 ${_numLabel(sameMain.$1, sameMain.$2)}번 위치', sameMain.$3, sameMain.$4,
+        exact: false);
+  }
+  (int, int, double, double)? lo, hi;
+  for (final r in recs.where((r) => r.$1 % 2 == m % 2)) {
+    if (r.$1 < m && (lo == null || r.$1 > lo.$1)) lo = r;
+    if (r.$1 > m && (hi == null || r.$1 < hi.$1)) hi = r;
+  }
+  if (lo != null && hi != null && _distM(lo.$3, lo.$4, hi.$3, hi.$4) < 3000) {
+    final t = (m - lo.$1) / (hi.$1 - lo.$1);
+    return SearchHit(title, '$pre번지 자료가 없어 ${lo.$1}~${hi.$1}번 사이로 추정', lo.$3 + (hi.$3 - lo.$3) * t,
+        lo.$4 + (hi.$4 - lo.$4) * t,
+        exact: false);
+  }
+  final near = lo ?? hi ?? recs.reduce((x, y) => (y.$1 - m).abs() < (x.$1 - m).abs() ? y : x);
+  return SearchHit(title, '$pre이 번지는 없어 가까운 ${_numLabel(near.$1, near.$2)}번 위치', near.$3, near.$4, exact: false);
 }
 
 /// 이름 바이트 [b][at, at+n)와 검색어 [q] 비교: 같으면 0, 앞부분이 같으면 1, 들어 있으면 2, 아니면 null

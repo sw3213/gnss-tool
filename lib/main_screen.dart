@@ -305,6 +305,7 @@ class _MainScreenState extends State<MainScreen> {
   void _onLongPress(double lat, double lon, {String? name}) {
     final s = widget.snap.value;
     final elev = widget.analysis.elevationAt(lat, lon);
+    widget.map.setPick(lat, lon); // 메뉴가 열려 있는 동안 고른 곳에 빨간 점
     showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -349,7 +350,7 @@ class _MainScreenState extends State<MainScreen> {
           ),
         ]),
       ),
-    );
+    ).whenComplete(() => widget.map.setPick(null, null));
   }
 
   void _needDem() => ScaffoldMessenger.of(context).showSnackBar(SnackBar(

@@ -17,7 +17,10 @@ void main() {
       ..addPlace('정관박물관', 7, 35.3250, 129.1800)
       ..addPlace('구목정 공원', 8, 35.3230, 129.1750)
       ..addPlace('관악산', 1, 37.4440, 126.9640)
-      ..addPlace('구연방곡로', 14, 35.3300, 129.1700); // 번지 자료 없는 도로
+      ..addPlace('구연방곡로', 14, 35.3300, 129.1700) // 번지 자료 없는 도로
+      // 칸 경계(위도 37.9)를 걸친 도로: 두 조각으로 저장됨
+      ..addAddress('공지로', '43', '춘천시', 37.8950, 127.7300)
+      ..addAddress('공지로', '87', '강원특별자치도 춘천시', 37.9050, 127.7300);
     path = '${Directory.systemTemp.createTempSync('addr').path}/t.gad';
     b.write(path);
   });
@@ -47,6 +50,14 @@ void main() {
     final r = searchAddress(path, '부산 정관로 127');
     expect(r.first.exact, isFalse);
     expect(r.first.detail, contains('125'));
+  });
+
+  test('a road split into pieces gives one answer, estimated between neighbours', () {
+    final r = searchAddress(path, '공지로 65');
+    expect(r.length, 1);
+    expect(r.single.detail, '강원특별자치도 춘천시 · 번지 자료가 없어 43~87번 사이로 추정');
+    expect(r.single.lat, closeTo(37.9000, 1e-6)); // 43과 87의 가운데
+    expect(searchAddress(path, '공지로 43-9').single.detail, contains('43번 위치')); // 같은 본번 건물
   });
 
   test('region narrows same-named roads; unknown region is filled from the area', () {

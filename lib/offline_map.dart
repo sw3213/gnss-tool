@@ -253,7 +253,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
 
   const empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
   final sources = <String, dynamic>{
-    for (final id in ['me', 'track', 'wpts', 'water', 'target', 'route']) id: {'type': 'geojson', 'data': empty},
+    for (final id in ['me', 'track', 'wpts', 'water', 'target', 'route', 'pick']) id: {'type': 'geojson', 'data': empty},
   };
   final layers = <Map<String, dynamic>>[
     for (final l in base)
@@ -703,6 +703,18 @@ const _meLayers = [
     'source': 'me',
     'paint': {'circle-radius': 18, 'circle-color': '#3b6cf6', 'circle-opacity': 0.15},
   },
+  // 길게 누른 곳·검색한 곳 (메뉴가 열려 있는 동안): 빨간 점 + 흰 테두리
+  {
+    'id': 'pick',
+    'type': 'circle',
+    'source': 'pick',
+    'paint': {
+      'circle-radius': 9,
+      'circle-color': '#f03e3e',
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 3,
+    },
+  },
   // 바라보는 방향: 파란 부채꼴 + 작은 삼각형 (그림은 MapControl._headingImage, 북쪽이 0°)
   {
     'id': 'me-heading',
@@ -801,6 +813,7 @@ class MapControl {
     _ctl?.setGeoJsonSource('water', _water);
     _drawTarget();
     _ctl?.setGeoJsonSource('route', _route);
+    _drawPick();
     for (final g in layerGroups) {
       if (hidden.value.contains(g.id)) _applyGroup(g, false);
     }
@@ -867,6 +880,33 @@ class MapControl {
       ],
     };
     if (_ready) _ctl?.setGeoJsonSource('water', _water);
+  }
+
+  (double, double)? _pick;
+
+  /// 길게 누른 곳·검색한 곳 표시 (null이면 지움)
+  void setPick(double? lat, double? lon) {
+    _pick = lat == null || lon == null ? null : (lat, lon);
+    _drawPick();
+  }
+
+  void _drawPick() {
+    final p = _pick;
+    if (!_ready) return;
+    _ctl?.setGeoJsonSource('pick', {
+      'type': 'FeatureCollection',
+      'features': [
+        if (p != null)
+          {
+            'type': 'Feature',
+            'geometry': {
+              'type': 'Point',
+              'coordinates': [p.$2, p.$1]
+            },
+            'properties': <String, dynamic>{},
+          }
+      ],
+    });
   }
 
   /// 검색한 곳으로 지도 옮기기 (내 위치 따라가기는 끔)
