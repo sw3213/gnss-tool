@@ -746,6 +746,40 @@ class MapControl {
   /// 지도를 길게 눌렀을 때 (메인 화면이 "여기로 안내 / 지점 저장" 메뉴를 띄움)
   void Function(double lat, double lon)? onLongPress;
 
+  /// 지도에서 이름 있는 것(가게·아파트·학교…)을 톡 눌렀을 때: 위치, 이름, 종류(한글, 모르면 null)
+  void Function(double lat, double lon, String name, String? kind)? onTapPlace;
+
+  /// 누른 곳 둘레(약 30 dp)에 그려진 것 중 이름 있는 것을 찾음 (점 > 선·면 순)
+  Future<void> _tapped(math.Point<double> pt, LatLng ll) async {
+    final c = _ctl, cb = onTapPlace;
+    if (c == null || cb == null) return;
+    List<dynamic> feats;
+    try {
+      feats = await c.queryRenderedFeaturesInRect(
+          Rect.fromCenter(center: Offset(pt.x, pt.y), width: 90, height: 90), const [], null);
+    } catch (_) {
+      return;
+    }
+    Map<String, dynamic>? best;
+    for (final f in feats.whereType<Map<String, dynamic>>()) {
+      final name = (f['properties'] as Map?)?['name'];
+      if (name is! String || name.trim().isEmpty) continue;
+      final isPoint = (f['geometry'] as Map?)?['type'] == 'Point';
+      if (best == null || (isPoint && (best['geometry'] as Map?)?['type'] != 'Point')) best = f;
+      if (isPoint) break;
+    }
+    if (best == null) return;
+    final props = best['properties'] as Map;
+    final g = best['geometry'] as Map?;
+    var (lat, lon) = (ll.latitude, ll.longitude);
+    if (g?['type'] == 'Point') {
+      final xy = (g!['coordinates'] as List).cast<num>();
+      (lat, lon) = (xy[1].toDouble(), xy[0].toDouble());
+    }
+    final kind = (props['kind'] ?? props['pmap:kind'])?.toString();
+    cb(lat, lon, (props['name'] as String).trim(), kindLabel(kind));
+  }
+
   // ---- 목표 지점 안내 선 ----
   NavTarget? _target;
   (double, double)? _me;
@@ -1183,6 +1217,7 @@ class _MapPageState extends State<MapPage> {
             },
             onCameraTrackingDismissed: () => ctl.follow.value = false,
             onMapLongClick: (_, ll) => ctl.onLongPress?.call(ll.latitude, ll.longitude),
+            onMapClick: ctl._tapped,
             ),
           ),
           // 왼쪽 위: 축척 막대 + 지도 출처 (OpenStreetMap 표시는 필수)
@@ -1537,6 +1572,54 @@ List<List<MapPack>> bundleCatalog(List<MapPack> catalog) {
 
 String bundleTitle(List<MapPack> parts) =>
     (parts.where((p) => p.kind == 'basemap').firstOrNull ?? parts.first).name.split(' ').first;
+
+/// 지도 자료의 종류(OSM/Protomaps kind) -> 한글. 모르는 것은 null
+String? kindLabel(String? kind) => switch (kind) {
+      null => null,
+      'restaurant' => '음식점',
+      'fast_food' => '패스트푸드',
+      'cafe' => '카페',
+      'bar' || 'pub' => '술집',
+      'bakery' => '빵집',
+      'convenience' => '편의점',
+      'supermarket' || 'grocery' => '마트',
+      'marketplace' => '시장',
+      'mall' || 'department_store' => '쇼핑몰',
+      'complex' => '아파트 단지',
+      'building' || 'bldg' => '건물',
+      'apartments' => '아파트',
+      'school' => '학교',
+      'kindergarten' => '유치원',
+      'university' || 'college' => '대학교',
+      'hospital' => '병원',
+      'clinic' || 'doctors' => '의원',
+      'dentist' => '치과',
+      'pharmacy' => '약국',
+      'bank' || 'atm' => '은행',
+      'post_office' => '우체국',
+      'police' => '경찰서',
+      'fire_station' => '소방서',
+      'townhall' => '관공서',
+      'library' => '도서관',
+      'park' || 'garden' => '공원',
+      'playground' => '놀이터',
+      'parking' => '주차장',
+      'fuel' => '주유소',
+      'charging_station' => '충전소',
+      'bus_stop' || 'bus_station' => '버스 정류장',
+      'station' || 'train_station' || 'subway' => '역',
+      'place_of_worship' => '종교시설',
+      'hotel' || 'motel' || 'hostel' || 'guest_house' => '숙박',
+      'museum' => '박물관',
+      'attraction' || 'viewpoint' => '관광지',
+      'peak' => '산',
+      'toilets' => '화장실',
+      'drinking_water' => '식수',
+      'shelter' => '대피소',
+      'cinema' => '영화관',
+      'sports_centre' || 'stadium' || 'pitch' => '체육시설',
+      _ => null,
+    };
 
 String partLabel(MapPack p) => switch (p.kind) {
       'basemap' => '지도',

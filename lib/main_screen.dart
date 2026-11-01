@@ -9,7 +9,7 @@ import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:maplibre_gl/maplibre_gl.dart' show CameraPosition;
 import 'package:path_provider/path_provider.dart';
 
-import 'address.dart' show SearchHit;
+import 'address.dart' show AddressSearcher, SearchHit;
 import 'advice.dart';
 import 'analysis.dart';
 import 'main.dart';
@@ -87,6 +87,7 @@ class _MainScreenState extends State<MainScreen> {
   void initState() {
     super.initState();
     widget.map.onLongPress = _onLongPress;
+    widget.map.onTapPlace = (lat, lon, name, kind) => _onLongPress(lat, lon, name: name, kind: kind);
     widget.guide.info.addListener(_checkArrival);
     widget.route.info.addListener(_checkRoute);
   }
@@ -94,6 +95,7 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void dispose() {
     widget.map.onLongPress = null;
+    widget.map.onTapPlace = null;
     widget.guide.info.removeListener(_checkArrival);
     widget.route.info.removeListener(_checkRoute);
     super.dispose();
@@ -301,27 +303,55 @@ class _MainScreenState extends State<MainScreen> {
     _onLongPress(h.lat, h.lon, name: h.title);
   }
 
-  /// 지도를 길게 누른 곳: 거리·고도를 보여 주고 "길 따라 안내" / "직선으로 안내" / "지점으로 저장"
-  void _onLongPress(double lat, double lon, {String? name}) {
+  /// 가장 가까운 도로명주소 (주소 검색 자료가 없거나 120 m 안에 주소가 없으면 null)
+  Future<SearchHit?> _addressNear(double lat, double lon) async {
+    final store = MapStore.instance;
+    final p = store.installed.value.where((p) => p.kind == 'address').firstOrNull;
+    final path = p == null ? null : store.fileOf(p.id);
+    if (path == null) return null;
+    try {
+      return await (await AddressSearcher.open(path)).nearest(lat, lon);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 지도를 길게 누른 곳·이름을 누른 곳·검색한 곳: 이름·종류·도로명주소·고도·거리를 보여 주고
+  /// "길 따라 안내" / "직선으로 안내" / "지점으로 저장"
+  void _onLongPress(double lat, double lon, {String? name, String? kind}) {
     final s = widget.snap.value;
     final elev = widget.analysis.elevationAt(lat, lon);
+    final address = _addressNear(lat, lon);
     widget.map.setPick(lat, lon); // 메뉴가 열려 있는 동안 고른 곳에 빨간 점
+    const sub = TextStyle(fontSize: 13, color: Colors.white70);
     showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(
             leading: const Icon(Icons.push_pin_outlined, color: Colors.redAccent),
-            title: Text([
-              if (name != null) name,
-              if (s.lat != null)
-                '${distanceLabel(distanceM(s.lat!, s.lon!, lat, lon))}  ·  '
-                    '${directionLabel(bearingDeg(s.lat!, s.lon!, lat, lon))}'
-              else if (name == null)
-                '선택한 곳',
-            ].join('\n')),
-            subtitle: Text('${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}'
-                '${elev == null ? '' : '  ·  고도 ${elev.round()} m'}'),
+            title: Text.rich(TextSpan(children: [
+              TextSpan(text: name ?? '선택한 곳'),
+              if (kind != null) TextSpan(text: '  $kind', style: const TextStyle(fontSize: 13, color: Colors.white60)),
+            ])),
+            subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              FutureBuilder<SearchHit?>(
+                future: address,
+                builder: (_, a) => a.data == null
+                    ? const SizedBox.shrink()
+                    : Text([a.data!.detail, a.data!.title].where((t) => t.isNotEmpty).join(' '), style: sub),
+              ),
+              Text(
+                  [
+                    if (elev != null) '고도 ${elev.round()} m',
+                    if (s.lat != null)
+                      '${distanceLabel(distanceM(s.lat!, s.lon!, lat, lon))} '
+                          '${directionLabel(bearingDeg(s.lat!, s.lon!, lat, lon))}',
+                  ].join('  ·  '),
+                  style: sub),
+              Text('${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}',
+                  style: const TextStyle(fontSize: 11, color: Colors.white38)),
+            ]),
           ),
           ListTile(
             leading: const Icon(Icons.alt_route),
