@@ -213,6 +213,67 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  final _menuOpen = ValueNotifier<bool>(false); // 오른쪽 아래 메뉴 펼침
+
+  /// 메뉴 버튼 위로 펼쳐지는 버튼들 (위에서 아래 순서). 옆에 이름표를 붙여 무슨 버튼인지 보이게
+  List<Widget> _menuButtons() {
+    Widget labeled(String label, Widget button) => Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(10)),
+            child: Text(label, style: const TextStyle(fontSize: 12, color: Colors.white)),
+          ),
+          const SizedBox(width: 8),
+          button,
+        ]);
+    return [
+      labeled(
+        '지도 레이어',
+        _RoundButton(
+          tooltip: '지도 레이어',
+          onTap: _showLayers,
+          child: const Icon(Icons.layers_outlined, size: 22),
+        ),
+      ),
+      ValueListenableBuilder<bool>(
+        valueListenable: _viewshedOn,
+        builder: (_, on, __) => labeled(
+          '가시권',
+          _RoundButton(
+            tooltip: '가시권 (지형에 가려 안 보이는 곳)',
+            active: on,
+            onTap: _toggleViewshed,
+            child: const Icon(Icons.visibility_outlined, size: 22),
+          ),
+        ),
+      ),
+      ValueListenableBuilder<bool>(
+        valueListenable: widget.map.tilted,
+        builder: (_, on, __) => labeled(
+          '3D',
+          _RoundButton(
+            tooltip: '3D (기울여 보기, 3D 건물)',
+            active: on,
+            onTap: widget.map.toggleTilt,
+            child: const Text('3D', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          ),
+        ),
+      ),
+      ValueListenableBuilder<bool>(
+        valueListenable: widget.track.recording,
+        builder: (_, rec, __) => labeled(
+          rec ? '이동 중지' : '이동 시작',
+          _RoundButton(
+            tooltip: rec ? '이동 기록 중지' : '이동 기록 시작',
+            onTap: _toggleTrack,
+            child: Icon(rec ? Icons.stop_circle_outlined : Icons.navigation_outlined,
+                size: 24, color: rec ? Colors.redAccent : Colors.orangeAccent),
+          ),
+        ),
+      ),
+    ];
+  }
+
   /// 주소·장소 검색 -> 고른 곳으로 지도를 옮기고 길게 누른 것과 같은 메뉴
   Future<void> _search() async {
     final s = widget.snap.value;
@@ -515,58 +576,63 @@ class _MainScreenState extends State<MainScreen> {
               ),
             ]),
           ),
-          // 오른쪽 아래(패널 위): 3D, 내 위치
+          // 오른쪽 아래(패널 위): 메뉴 버튼(누르면 이동 시작·레이어·가시권·3D가 위로 펼쳐짐) + 왼쪽에 내 위치
           ValueListenableBuilder<double>(
             valueListenable: _sheet,
             builder: (_, ext, __) => Positioned(
               right: 10,
               bottom: ext * box.maxHeight + 10,
-              child: Column(children: [
-                _RoundButton(
-                  tooltip: '주소·장소 검색',
-                  onTap: _search,
-                  child: const Icon(Icons.search, size: 24),
-                ),
-                const SizedBox(height: 10),
-                _RoundButton(
-                  tooltip: '지도 레이어',
-                  onTap: _showLayers,
-                  child: const Icon(Icons.layers_outlined, size: 22),
-                ),
-                const SizedBox(height: 10),
-                ValueListenableBuilder<bool>(
-                  valueListenable: _viewshedOn,
-                  builder: (_, on, __) => _RoundButton(
-                    tooltip: '가시권 (지형에 가려 안 보이는 곳)',
-                    active: on,
-                    onTap: _toggleViewshed,
-                    child: const Icon(Icons.visibility_outlined, size: 22),
+              child: ValueListenableBuilder<bool>(
+                valueListenable: _menuOpen,
+                builder: (_, open, __) => Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                  ValueListenableBuilder<bool>(
+                    valueListenable: widget.map.follow,
+                    builder: (_, on, __) => _RoundButton(
+                      tooltip: '내 위치',
+                      active: on,
+                      onTap: () {
+                        final s = widget.snap.value;
+                        if (s.lat != null && s.lon != null) widget.map.recenter(s.lat!, s.lon!);
+                      },
+                      child: const Icon(Icons.my_location, size: 22),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 10),
-                ValueListenableBuilder<bool>(
-                  valueListenable: widget.map.tilted,
-                  builder: (_, on, __) => _RoundButton(
-                    tooltip: '3D (기울여 보기, 3D 건물)',
-                    active: on,
-                    onTap: widget.map.toggleTilt,
-                    child: const Text('3D', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                ValueListenableBuilder<bool>(
-                  valueListenable: widget.map.follow,
-                  builder: (_, on, __) => _RoundButton(
-                    tooltip: '내 위치',
-                    active: on,
-                    onTap: () {
-                      final s = widget.snap.value;
-                      if (s.lat != null && s.lon != null) widget.map.recenter(s.lat!, s.lon!);
-                    },
-                    child: const Icon(Icons.navigation, size: 22),
-                  ),
-                ),
-              ]),
+                  const SizedBox(width: 10),
+                  Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                    AnimatedSize(
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOut,
+                      alignment: Alignment.bottomCenter,
+                      child: !open
+                          ? const SizedBox(width: 50)
+                          : Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                              for (final (i, b) in _menuButtons().indexed)
+                                // 아래 것부터 차례로 올라오며 나타남
+                                TweenAnimationBuilder<double>(
+                                  tween: Tween(begin: 0, end: 1),
+                                  duration: Duration(milliseconds: 160 + 50 * (3 - i)),
+                                  curve: Curves.easeOutBack,
+                                  builder: (_, t, child) => Opacity(
+                                    opacity: t.clamp(0.0, 1.0).toDouble(),
+                                    child: Transform.translate(offset: Offset(0, 30 * (1 - t)), child: child),
+                                  ),
+                                  child: Padding(padding: const EdgeInsets.only(bottom: 10), child: b),
+                                ),
+                            ]),
+                    ),
+                    _RoundButton(
+                      tooltip: open ? '메뉴 접기' : '메뉴 펼치기',
+                      active: open,
+                      onTap: () => _menuOpen.value = !open,
+                      child: AnimatedRotation(
+                        turns: open ? 0.125 : 0,
+                        duration: const Duration(milliseconds: 200),
+                        child: Icon(open ? Icons.add : Icons.menu, size: 24),
+                      ),
+                    ),
+                  ]),
+                ]),
+              ),
             ),
           ),
           // 왼쪽 아래(패널 위): 일출·일몰까지 남은 시간
@@ -636,8 +702,7 @@ class _MainScreenState extends State<MainScreen> {
         ]);
       }),
       bottomNavigationBar: _BottomBar(
-        track: widget.track,
-        onTrack: _toggleTrack,
+        onSearch: _search,
         onWaypoint: _saveWaypoint,
         onOffline: () => Navigator.of(context)
             .push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage())),
@@ -1003,11 +1068,9 @@ class _PanelItem extends StatelessWidget {
 }
 
 class _BottomBar extends StatelessWidget {
-  final TrackRecorder track;
-  final VoidCallback onTrack, onWaypoint, onOffline, onTools;
+  final VoidCallback onSearch, onWaypoint, onOffline, onTools;
   const _BottomBar({
-    required this.track,
-    required this.onTrack,
+    required this.onSearch,
     required this.onWaypoint,
     required this.onOffline,
     required this.onTools,
@@ -1021,15 +1084,7 @@ class _BottomBar extends StatelessWidget {
           child: SizedBox(
             height: 64,
             child: Row(children: [
-              ValueListenableBuilder<bool>(
-                valueListenable: track.recording,
-                builder: (_, rec, __) => _item(
-                  rec ? Icons.stop_circle_outlined : Icons.navigation_outlined,
-                  rec ? '이동 중지' : '이동 시작',
-                  rec ? Colors.redAccent : Colors.orangeAccent,
-                  onTrack,
-                ),
-              ),
+              _item(Icons.search, '검색', Colors.orangeAccent, onSearch),
               _item(Icons.add_location_alt_outlined, '지점 저장', Colors.amber, onWaypoint),
               _item(Icons.download_for_offline_outlined, '오프라인', const Color(0xFF4D7CFE), onOffline),
               _item(Icons.more_horiz, '도구', Colors.white70, onTools),
@@ -1280,7 +1335,7 @@ class _RoutesPageState extends State<RoutesPage> {
             ),
           for (final f in routes) _tile(f, imported: true),
           const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('내 이동 기록', style: head)),
-          if (tracks.isEmpty) const ListTile(title: Text('아래 [이동 시작]으로 기록하면 여기에 저장됩니다')),
+          if (tracks.isEmpty) const ListTile(title: Text('지도 오른쪽 아래 메뉴의 [이동 시작]으로 기록하면 여기에 저장됩니다')),
           for (final f in tracks) _tile(f, imported: false),
         ]),
       Positioned(

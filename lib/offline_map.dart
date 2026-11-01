@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -702,6 +703,20 @@ const _meLayers = [
     'source': 'me',
     'paint': {'circle-radius': 18, 'circle-color': '#3b6cf6', 'circle-opacity': 0.15},
   },
+  // 바라보는 방향: 파란 부채꼴 + 작은 삼각형 (그림은 MapControl._headingImage, 북쪽이 0°)
+  {
+    'id': 'me-heading',
+    'type': 'symbol',
+    'source': 'me',
+    'filter': ['has', 'heading'],
+    'layout': {
+      'icon-image': 'me-heading',
+      'icon-rotate': ['get', 'heading'],
+      'icon-rotation-alignment': 'map',
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+    },
+  },
   {
     'id': 'me',
     'type': 'circle',
@@ -778,6 +793,8 @@ class MapControl {
 
   void _styleLoaded() {
     _ready = true;
+    _headingImage().then((b) => _ctl?.addImage('me-heading', b)).catchError((Object _) {});
+    _drawMe();
     if (tilted.value) _show3dBuildings();
     _ctl?.setGeoJsonSource('track', _track);
     _ctl?.setGeoJsonSource('wpts', _wpts);
@@ -863,8 +880,62 @@ class MapControl {
     _ctl?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), math.max(camera.value?.zoom ?? 15, 15)));
   }
 
+  // ---- 내 위치 점 + 바라보는 방향 ----
+  double? _heading, _drawnHeading;
+
+  void _drawMe() {
+    final me = _me;
+    if (!_ready || me == null) return;
+    _drawnHeading = _heading;
+    _ctl?.setGeoJsonSource('me', {
+      'type': 'FeatureCollection',
+      'features': [
+        {
+          'type': 'Feature',
+          'geometry': {
+            'type': 'Point',
+            'coordinates': [me.$2, me.$1]
+          },
+          'properties': <String, dynamic>{if (_heading != null) 'heading': _heading},
+        }
+      ],
+    });
+  }
+
+  static Future<Uint8List>? _headingPng;
+
+  /// 방향 그림 (150 px, 가운데가 내 위치). 폰 화면 밀도로 줄어 약 50 dp로 보임
+  static Future<Uint8List> _headingImage() => _headingPng ??= () async {
+        const s = 150.0, c = Offset(s / 2, s / 2), blue = Color(0xFF3B6CF6);
+        final rec = ui.PictureRecorder();
+        final canvas = Canvas(rec);
+        final fan = Path()
+          ..moveTo(c.dx, c.dy)
+          ..arcTo(Rect.fromCircle(center: c, radius: s / 2), -math.pi / 2 - math.pi / 6, math.pi / 3, false)
+          ..close();
+        canvas.drawPath(fan, Paint()..shader = ui.Gradient.radial(c, s / 2, [blue.withAlpha(150), blue.withAlpha(0)]));
+        final tri = Path()
+          ..moveTo(c.dx, c.dy - 50)
+          ..lineTo(c.dx - 13, c.dy - 30)
+          ..lineTo(c.dx + 13, c.dy - 30)
+          ..close();
+        canvas.drawPath(
+            tri,
+            Paint()
+              ..color = Colors.white
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 6
+              ..strokeJoin = StrokeJoin.round);
+        canvas.drawPath(tri, Paint()..color = blue);
+        final img = await rec.endRecording().toImage(s.toInt(), s.toInt());
+        return (await img.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      }();
+
   /// 나침반 방위가 바뀔 때 (진행 방향 위 모드일 때만 지도를 돌림)
   void onHeading(double deg) {
+    _heading = deg;
+    final d = _drawnHeading;
+    if (d == null || ((deg - d + 540) % 360 - 180).abs() >= 3) _drawMe(); // 3° 넘게 돌았을 때만 다시 그림
     if (headingUp.value) _ctl?.animateCamera(CameraUpdate.bearingTo(deg), duration: const Duration(milliseconds: 200));
   }
 
@@ -1022,17 +1093,8 @@ class _MapPageState extends State<MapPage> {
     final s = widget.snap.value;
     final c = ctl._ctl;
     if (c == null || !ctl._ready || s.lat == null || s.lon == null) return;
-    c.setGeoJsonSource('me', {
-      'type': 'FeatureCollection',
-      'features': [
-        {
-          'type': 'Feature',
-          'geometry': {'type': 'Point', 'coordinates': [s.lon, s.lat]},
-          'properties': <String, dynamic>{},
-        }
-      ],
-    });
     ctl._me = (s.lat!, s.lon!);
+    ctl._drawMe();
     if (ctl._target != null) ctl._drawTarget();
     if (ctl.follow.value) c.animateCamera(CameraUpdate.newLatLng(LatLng(s.lat!, s.lon!)));
   }
