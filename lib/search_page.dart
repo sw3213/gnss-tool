@@ -133,7 +133,7 @@ class _SearchPageState extends State<SearchPage> {
     if (hits.isEmpty) {
       return const Padding(
         padding: EdgeInsets.all(20),
-        child: Text('찾지 못했습니다. 도로 이름과 번호 사이를 띄어 보세요 (예: 정관로 123)',
+        child: Text('찾지 못했습니다. 도로 이름이나 장소 이름을 다시 확인해 보세요 (예: 정관로 123, 정관박물관)',
             style: TextStyle(color: Colors.white60)),
       );
     }

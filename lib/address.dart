@@ -208,6 +208,11 @@ class SearchHit {
 /// 검색어 나누기: "부산 기장군 정관로 123-4" -> 지역 ["부산", "기장군"], 도로 "정관로", 번지 (123, 4)
 ({List<String> region, String? road, (int, int)? number}) parseQuery(String q) {
   var t = q.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
+  // 붙여 쓴 번호 떼기: "공지로69-9" -> "공지로" "69-9", "대덕대로578번길27번지" -> "대덕대로578번길" "27"
+  if (t.isNotEmpty) {
+    final m = RegExp(r'^(.+?(?:로|길))(\d{1,5}(?:-\d{1,5})?)(?:번지)?$').firstMatch(t.last);
+    if (m != null) t = [...t.sublist(0, t.length - 1), m.group(1)!, m.group(2)!];
+  }
   (int, int)? number;
   if (t.isNotEmpty) {
     final last = t.last.replaceAll('번지', '');

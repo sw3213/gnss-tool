@@ -32,6 +32,14 @@ void main() {
     expect(q.number, (123, 4));
     expect(parseQuery('대덕대로 578번길 27').road, '대덕대로578번길');
     expect(parseQuery('정관박물관').road, isNull);
+    // 붙여 써도 나눔
+    expect(parseQuery('공지로69-9').road, '공지로');
+    expect(parseQuery('공지로69-9').number, (69, 9));
+    expect(parseQuery('대덕대로578번길27번지').road, '대덕대로578번길');
+    expect(parseQuery('대덕대로578번길27번지').number, (27, 0));
+    expect(parseQuery('산단4로160').road, '산단4로');
+    expect(parseQuery('산단4로160').number, (160, 0));
+    expect(parseQuery('부산 정관로123').region, ['부산']);
     expect(parseHouseNumber('284-12'), (284, 12));
     expect(parseHouseNumber('산12'), isNull);
   });
