@@ -259,108 +259,112 @@ class _Reader {
 }
 
 /// 주소·장소 찾기. [lat]/[lon]은 지금 위치 (가까운 순으로 정렬, 모르면 null)
-List<SearchHit> searchAddress(String path, String query, {double? lat, double? lon, int limit = 30}) {
-  final f = File(path).openSync();
-  try {
-    Uint8List read(int off, int len) {
-      f.setPositionSync(off);
-      return f.readSync(len);
-    }
+List<SearchHit> searchAddress(String path, String query, {double? lat, double? lon, int limit = 30}) =>
+    searchIndex(File(path).readAsBytesSync(), query, lat: lat, lon: lon, limit: limit);
 
-    final h = _Reader(read(0, 40));
-    if (String.fromCharCodes([h.u8(), h.u8(), h.u8(), h.u8()]) != 'GADR') {
-      throw const FormatException('주소 검색 자료 파일이 아님');
-    }
-    if (h.u16() != addressFormatVersion) throw const FormatException('주소 검색 자료 형식이 다름. 다시 받아 주세요');
-    h.u16();
-    final nRegions = h.u32(), nStreets = h.u32();
-    h.u32(); // 번지 수
-    final nPlaces = h.u32();
-    final regionsOff = h.u32(), streetsOff = h.u32(), recsOff = h.u32(), placesOff = h.u32();
+/// 메모리에 올린 자료([data] = 파일 전체)에서 찾기
+List<SearchHit> searchIndex(Uint8List data, String query, {double? lat, double? lon, int limit = 30}) {
+  Uint8List read(int off, int len) => Uint8List.sublistView(data, off, off + len);
 
-    final rr = _Reader(read(regionsOff, streetsOff - regionsOff));
-    final regions = [for (var i = 0; i < nRegions; i++) rr.str()];
-
-    double dist(double la, double lo) => lat == null || lon == null ? 0 : _distM(lat, lon, la, lo);
-    final hits = <(int, double, SearchHit)>[]; // (순위: 작을수록 앞, 거리, 결과)
-
-    final q = parseQuery(query);
-    final qs = Uint8List.fromList(utf8.encode(q.road ?? normalizeName(query)));
-    if (qs.isEmpty) return const [];
-
-    // 도로
-    final sb = read(streetsOff, recsOff - streetsOff);
-    final sr = _Reader(sb);
-    final roads = <(int rank, String name, String region, int start, int count, double la, double lo)>[];
-    for (var i = 0; i < nStreets; i++) {
-      final n = sr.u8(), at = sr.p;
-      sr.p += n;
-      final region = sr.u16(), start = sr.u32(), count = sr.u32(), la = sr.i32() / 1e6, lo = sr.i32() / 1e6;
-      final rank = _match(sb, at, n, qs);
-      if (rank == null || (q.road != null && q.number != null && rank > 0)) continue; // 번지 검색은 도로 이름이 같아야
-      roads.add((rank, utf8.decode(Uint8List.sublistView(sb, at, at + n)), regions[region], start, count, la, lo));
-    }
-    // "부산 기장군"처럼 지역을 쳤으면 그 지역만 (맞는 게 하나도 없으면 지역은 무시)
-    bool inRegion(String reg) => q.region.every((w) => normalizeName(reg).contains(normalizeName(w)));
-    final local = roads.where((r) => inRegion(r.$3)).toList();
-    for (final r in local.isEmpty ? roads : local) {
-      final num = q.number;
-      if (q.road != null && num != null) {
-        final rb = _Reader(read(recsOff + r.$4 * 12, r.$5 * 12));
-        (int, int, double, double)? exact, near;
-        var nearGap = 1 << 30;
-        for (var k = 0; k < r.$5; k++) {
-          final a = rb.u16(), b = rb.u16(), la = rb.i32() / 1e6, lo = rb.i32() / 1e6;
-          if (a == num.$1 && b == num.$2) exact = (a, b, la, lo);
-          // 없는 번지: 같은 쪽(홀짝) 가장 가까운 번지
-          final gap = (a - num.$1).abs() * 2 + (a % 2 == num.$1 % 2 ? 0 : 1000000) + (b == 0 ? 0 : 1);
-          if (gap < nearGap) (nearGap, near) = (gap, (a, b, la, lo));
-        }
-        final title = '${r.$2} ${num.$1}${num.$2 == 0 ? '' : '-${num.$2}'}';
-        if (exact != null) {
-          hits.add((0, dist(exact.$3, exact.$4), SearchHit(title, r.$3, exact.$3, exact.$4)));
-        } else if (near != null) {
-          final nn = '${near.$1}${near.$2 == 0 ? '' : '-${near.$2}'}';
-          hits.add((1, dist(near.$3, near.$4),
-              SearchHit(title, '${r.$3.isEmpty ? '' : '${r.$3} · '}이 번지는 없어 가까운 $nn번 위치', near.$3, near.$4,
-                  exact: false)));
-        }
-      } else {
-        hits.add((2 + r.$1, dist(r.$6, r.$7), SearchHit(r.$2, r.$3.isEmpty ? '도로' : '도로 · ${r.$3}', r.$6, r.$7)));
-      }
-    }
-
-    // 장소 이름 (번지까지 친 주소면 안 찾음)
-    if (q.number == null || q.road == null) {
-      final ps = normalizeName(query);
-      final pq = Uint8List.fromList(utf8.encode(ps));
-      final pb = read(placesOff, f.lengthSync() - placesOff);
-      final pr = _Reader(pb);
-      for (var i = 0; i < nPlaces; i++) {
-        final n = pr.u8(), at = pr.p;
-        pr.p += n;
-        final kind = pr.u8(), la = pr.i32() / 1e6, lo = pr.i32() / 1e6;
-        final rank = _match(pb, at, n, pq);
-        if (rank == null) continue;
-        final name = utf8.decode(Uint8List.sublistView(pb, at, at + n));
-        hits.add((2 + rank, dist(la, lo), SearchHit(name, placeKinds[kind < placeKinds.length ? kind : 0], la, lo)));
-        if (hits.length > 20000) break;
-      }
-    }
-    hits.sort((a, b) => a.$1 != b.$1 ? a.$1 - b.$1 : a.$2.compareTo(b.$2));
-    // 정확한 번지가 있으면 "가까운 번지"는 빼고, 같은 이름·설명은 가장 가까운 하나만
-    final hasExact = hits.any((h) => h.$1 == 0 && q.number != null);
-    final seen = <String>{}, out = <SearchHit>[];
-    for (final h in hits) {
-      if (hasExact && h.$1 == 1) continue;
-      if (!seen.add('${h.$3.title}|${h.$3.detail}')) continue;
-      out.add(h.$3);
-      if (out.length >= limit) break;
-    }
-    return out;
-  } finally {
-    f.closeSync();
+  final h = _Reader(read(0, 40));
+  if (String.fromCharCodes([h.u8(), h.u8(), h.u8(), h.u8()]) != 'GADR') {
+    throw const FormatException('주소 검색 자료 파일이 아님');
   }
+  if (h.u16() != addressFormatVersion) throw const FormatException('주소 검색 자료 형식이 다름. 다시 받아 주세요');
+  h.u16();
+  final nRegions = h.u32(), nStreets = h.u32();
+  h.u32(); // 번지 수
+  final nPlaces = h.u32();
+  final regionsOff = h.u32(), streetsOff = h.u32(), recsOff = h.u32(), placesOff = h.u32();
+
+  final rr = _Reader(read(regionsOff, streetsOff - regionsOff));
+  final regions = [for (var i = 0; i < nRegions; i++) rr.str()];
+
+  double dist(double la, double lo) => lat == null || lon == null ? 0 : _distM(lat, lon, la, lo);
+  final hits = <(int, double, SearchHit)>[]; // (순위: 작을수록 앞, 거리, 결과)
+
+  final q = parseQuery(query);
+  final qs = Uint8List.fromList(utf8.encode(q.road ?? normalizeName(query)));
+  if (qs.isEmpty) return const [];
+
+  // 도로
+  final sb = read(streetsOff, recsOff - streetsOff);
+  final sr = _Reader(sb);
+  final roads = <(int rank, String name, String region, int start, int count, double la, double lo)>[];
+  for (var i = 0; i < nStreets; i++) {
+    final n = sr.u8(), at = sr.p;
+    sr.p += n;
+    final region = sr.u16(), start = sr.u32(), count = sr.u32(), la = sr.i32() / 1e6, lo = sr.i32() / 1e6;
+    final rank = _match(sb, at, n, qs);
+    if (rank == null || (q.road != null && q.number != null && rank > 0)) continue; // 번지 검색은 도로 이름이 같아야
+    roads.add((rank, utf8.decode(Uint8List.sublistView(sb, at, at + n)), regions[region], start, count, la, lo));
+  }
+  // "부산 기장군"처럼 지역을 쳤으면 그 지역만 (맞는 게 하나도 없으면 지역은 무시)
+  bool inRegion(String reg) => q.region.every((w) => normalizeName(reg).contains(normalizeName(w)));
+  final local = roads.where((r) => inRegion(r.$3)).toList();
+  for (final r in local.isEmpty ? roads : local) {
+    final num = q.number;
+    if (q.road != null && num != null) {
+      final rb = _Reader(read(recsOff + r.$4 * 12, r.$5 * 12));
+      (int, int, double, double)? exact, near;
+      var nearGap = 1 << 30;
+      for (var k = 0; k < r.$5; k++) {
+        final a = rb.u16(), b = rb.u16(), la = rb.i32() / 1e6, lo = rb.i32() / 1e6;
+        if (a == num.$1 && b == num.$2) exact = (a, b, la, lo);
+        // 없는 번지: 같은 쪽(홀짝) 가장 가까운 번지
+        final gap = (a - num.$1).abs() * 2 + (a % 2 == num.$1 % 2 ? 0 : 1000000) + (b == 0 ? 0 : 1);
+        if (gap < nearGap) (nearGap, near) = (gap, (a, b, la, lo));
+      }
+      final title = '${r.$2} ${num.$1}${num.$2 == 0 ? '' : '-${num.$2}'}';
+      if (exact != null) {
+        hits.add((0, dist(exact.$3, exact.$4), SearchHit(title, r.$3, exact.$3, exact.$4)));
+      } else if (near != null) {
+        final nn = '${near.$1}${near.$2 == 0 ? '' : '-${near.$2}'}';
+        hits.add((1, dist(near.$3, near.$4),
+            SearchHit(title, '${r.$3.isEmpty ? '' : '${r.$3} · '}이 번지는 없어 가까운 $nn번 위치', near.$3, near.$4,
+                exact: false)));
+      }
+    } else {
+      hits.add((2 + r.$1, dist(r.$6, r.$7), SearchHit(r.$2, r.$3.isEmpty ? '도로' : '도로 · ${r.$3}', r.$6, r.$7)));
+    }
+  }
+
+  // 번지 자료가 없는 도로: 도로 위치라도 (OSM 도로 이름에서)
+  final roadOnly = q.road != null && q.number != null && hits.isEmpty;
+  // 장소 이름 (번지까지 친 주소면 안 찾음)
+  if (q.number == null || q.road == null || roadOnly) {
+    final ps = roadOnly ? q.road! : normalizeName(query);
+    final pq = Uint8List.fromList(utf8.encode(ps));
+    final pb = read(placesOff, data.length - placesOff);
+    final pr = _Reader(pb);
+    for (var i = 0; i < nPlaces; i++) {
+      final n = pr.u8(), at = pr.p;
+      pr.p += n;
+      final kind = pr.u8(), la = pr.i32() / 1e6, lo = pr.i32() / 1e6;
+      final rank = _match(pb, at, n, pq);
+      if (rank == null) continue;
+      final name = utf8.decode(Uint8List.sublistView(pb, at, at + n));
+      if (roadOnly) {
+        if (rank == 0 && kind == 14) {
+          hits.add((1, dist(la, lo), SearchHit(query.trim(), '$name · 번지 자료가 없어 도로 위치만', la, lo, exact: false)));
+        }
+        continue;
+      }
+      hits.add((2 + rank, dist(la, lo), SearchHit(name, placeKinds[kind < placeKinds.length ? kind : 0], la, lo)));
+      if (hits.length > 20000) break;
+    }
+  }
+  hits.sort((a, b) => a.$1 != b.$1 ? a.$1 - b.$1 : a.$2.compareTo(b.$2));
+  // 정확한 번지가 있으면 "가까운 번지"는 빼고, 같은 이름·설명은 가장 가까운 하나만
+  final hasExact = hits.any((h) => h.$1 == 0 && q.number != null);
+  final seen = <String>{}, out = <SearchHit>[];
+  for (final h in hits) {
+    if (hasExact && h.$1 == 1) continue;
+    if (!seen.add('${h.$3.title}|${h.$3.detail}')) continue;
+    out.add(h.$3);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 /// 이름 바이트 [b][at, at+n)와 검색어 [q] 비교: 같으면 0, 앞부분이 같으면 1, 들어 있으면 2, 아니면 null
@@ -382,6 +386,44 @@ int? _match(Uint8List b, int at, int n, Uint8List q) {
   return null;
 }
 
-/// 별도 스레드에서 찾기 (화면이 멈추지 않게)
-Future<List<SearchHit>> searchAddressInBackground(String path, String query, {double? lat, double? lon}) =>
-    Isolate.run(() => searchAddress(path, query, lat: lat, lon: lon));
+/// 검색 전용 스레드: 자료를 한 번만 읽어 메모리에 두고 계속 씀 (글자 칠 때마다 파일을 다시 읽으면 화면이 버벅임)
+class AddressSearcher {
+  static AddressSearcher? _open;
+  final String path;
+  final SendPort _to;
+  AddressSearcher._(this.path, this._to);
+
+  /// [path] 자료로 검색 스레드 준비 (같은 파일이면 있던 것을 다시 씀)
+  static Future<AddressSearcher> open(String path) async {
+    final o = _open;
+    if (o != null && o.path == path) return o;
+    o?._to.send(null); // 옛 자료(업데이트 전) 스레드 끝내기
+    final ready = ReceivePort();
+    await Isolate.spawn(_serve, (path, ready.sendPort));
+    final to = await ready.first as SendPort;
+    return _open = AddressSearcher._(path, to);
+  }
+
+  Future<List<SearchHit>> search(String query, {double? lat, double? lon}) async {
+    final reply = ReceivePort();
+    _to.send((query, lat, lon, reply.sendPort));
+    final r = await reply.first;
+    if (r is String) throw FormatException(r);
+    return r as List<SearchHit>;
+  }
+
+  static void _serve((String, SendPort) a) {
+    final data = File(a.$1).readAsBytesSync();
+    final inbox = ReceivePort();
+    a.$2.send(inbox.sendPort);
+    inbox.listen((m) {
+      if (m == null) return inbox.close();
+      final (q, lat, lon, reply) = m as (String, double?, double?, SendPort);
+      try {
+        reply.send(searchIndex(data, q, lat: lat, lon: lon));
+      } catch (e) {
+        reply.send('$e');
+      }
+    });
+  }
+}

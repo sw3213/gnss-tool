@@ -41,7 +41,7 @@ class _SearchPageState extends State<SearchPage> {
 
   void _changed(String q) {
     _wait?.cancel();
-    _wait = Timer(const Duration(milliseconds: 400), () => _search(q));
+    _wait = Timer(const Duration(milliseconds: 500), () => _search(q)); // 다 칠 때까지 잠깐 기다림
   }
 
   Future<void> _search(String q) async {
@@ -53,7 +53,7 @@ class _SearchPageState extends State<SearchPage> {
     final seq = ++_seq;
     setState(() => _busy = true);
     try {
-      final r = await searchAddressInBackground(path, q, lat: widget.lat, lon: widget.lon);
+      final r = await (await AddressSearcher.open(path)).search(q, lat: widget.lat, lon: widget.lon);
       if (mounted && seq == _seq) setState(() {
           _hits = r;
           _error = null;
@@ -90,7 +90,11 @@ class _SearchPageState extends State<SearchPage> {
               },
             ),
         ],
-        bottom: _busy ? const PreferredSize(preferredSize: Size.fromHeight(2), child: LinearProgressIndicator()) : null,
+        // 높이를 항상 같게 (찾는 중 표시가 생겼다 없어지며 입력칸이 들썩이지 않게)
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(2),
+          child: _busy ? const LinearProgressIndicator(minHeight: 2) : const SizedBox(height: 2),
+        ),
       ),
       body: !hasData ? _needData(context) : _results(),
     );
