@@ -11,8 +11,9 @@ import 'offline_map.dart';
 // 결과를 누르면 그 결과를 돌려주고 닫힘 (메인 화면이 지도를 옮기고 "길 따라 안내" 메뉴를 띄움)
 
 class SearchPage extends StatefulWidget {
-  final double? lat, lon; // 지금 위치: 가까운 순 정렬과 거리 표시
-  const SearchPage({super.key, this.lat, this.lon});
+  final double? lat, lon; // 내 위치 (모르면 null)
+  final double? mapLat, mapLon; // 지금 보고 있는 지도 가운데
+  const SearchPage({super.key, this.lat, this.lon, this.mapLat, this.mapLon});
 
   @override
   State<SearchPage> createState() => _SearchPageState();
@@ -25,6 +26,10 @@ class _SearchPageState extends State<SearchPage> {
   bool _busy = false;
   String? _error;
   int _seq = 0; // 늦게 끝난 옛 검색 결과는 버림
+  bool _byMe = false; // 가까운 순 기준: false 지도 가운데, true 내 위치 (카카오맵의 지도중심/내위치중심)
+
+  (double?, double?) get _center =>
+      _byMe || widget.mapLat == null ? (widget.lat, widget.lon) : (widget.mapLat, widget.mapLon);
 
   String? get _file {
     final store = MapStore.instance;
@@ -53,7 +58,8 @@ class _SearchPageState extends State<SearchPage> {
     final seq = ++_seq;
     setState(() => _busy = true);
     try {
-      final r = await (await AddressSearcher.open(path)).search(q, lat: widget.lat, lon: widget.lon);
+      final (lat, lon) = _center;
+      final r = await (await AddressSearcher.open(path)).search(q, lat: lat, lon: lon);
       if (mounted && seq == _seq) setState(() {
           _hits = r;
           _error = null;
@@ -96,7 +102,31 @@ class _SearchPageState extends State<SearchPage> {
           child: _busy ? const LinearProgressIndicator(minHeight: 2) : const SizedBox(height: 2),
         ),
       ),
-      body: !hasData ? _needData(context) : _results(),
+      body: !hasData
+          ? _needData(context)
+          : Column(children: [
+              // 가까운 순 기준 고르기
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                child: Row(children: [
+                  for (final (me, label) in [(false, '지도 중심'), (true, '내 위치 중심')])
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(
+                        label: Text(label),
+                        selected: _byMe == me,
+                        onSelected: me && widget.lat == null
+                            ? null // 내 위치를 아직 모름
+                            : (_) {
+                                setState(() => _byMe = me);
+                                _search(_text.text);
+                              },
+                      ),
+                    ),
+                ]),
+              ),
+              Expanded(child: _results()),
+            ]),
     );
   }
 
@@ -137,7 +167,7 @@ class _SearchPageState extends State<SearchPage> {
             style: TextStyle(color: Colors.white60)),
       );
     }
-    final lat = widget.lat, lon = widget.lon;
+    final (lat, lon) = _center;
     return ListView.separated(
       itemCount: hits.length,
       separatorBuilder: (_, __) => const Divider(height: 1),

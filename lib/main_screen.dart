@@ -313,7 +313,13 @@ class _MainScreenState extends State<MainScreen> {
     final s = widget.snap.value;
     final ok = s.fixQ > 0;
     final h = await Navigator.of(context).push<SearchHit>(
-        MaterialPageRoute(builder: (_) => SearchPage(lat: ok ? s.lat : null, lon: ok ? s.lon : null)));
+        MaterialPageRoute(
+            builder: (_) => SearchPage(
+                  lat: ok ? s.lat : null,
+                  lon: ok ? s.lon : null,
+                  mapLat: widget.map.camera.value?.target.latitude,
+                  mapLon: widget.map.camera.value?.target.longitude,
+                )));
     if (h == null || !mounted) return;
     widget.map.showPlace(h.lat, h.lon);
     _onLongPress(h.lat, h.lon, name: h.title);

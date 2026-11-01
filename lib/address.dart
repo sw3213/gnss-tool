@@ -8,6 +8,7 @@
 //   번지: [u16 본번][u16 부번][i32 위도][i32 경도]  도로별로 본번·부번 순 정렬 (12바이트)
 //   장소: [u8 길이][이름][u8 종류][i32 위도][i32 경도]
 // 이름은 띄어쓰기를 빼고 저장 (검색어도 띄어쓰기를 빼고 비교). 좌표는 도 × 1e6
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -199,7 +200,8 @@ class SearchHit {
   final String detail; // "부산광역시 기장군" / "관광" / "근처 번지 (121)"
   final double lat, lon;
   final bool exact; // 정확히 찾은 번지·이름
-  const SearchHit(this.title, this.detail, this.lat, this.lon, {this.exact = true});
+  final bool place; // 장소 이름으로 찾은 것 (주소·도로가 아님)
+  const SearchHit(this.title, this.detail, this.lat, this.lon, {this.exact = true, this.place = false});
 
   @override
   String toString() => '$title ($detail) $lat,$lon';
@@ -263,12 +265,86 @@ class _Reader {
   }
 }
 
-/// 주소·장소 찾기. [lat]/[lon]은 지금 위치 (가까운 순으로 정렬, 모르면 null)
+/// 주소·장소 찾기. [lat]/[lon]은 기준 위치 (지도 중심이나 내 위치, 가까운 순으로 정렬, 모르면 null)
 List<SearchHit> searchAddress(String path, String query, {double? lat, double? lon, int limit = 30}) =>
     searchIndex(File(path).readAsBytesSync(), query, lat: lat, lon: lon, limit: limit);
 
-/// 메모리에 올린 자료([data] = 파일 전체)에서 찾기
-List<SearchHit> searchIndex(Uint8List data, String query, {double? lat, double? lon, int limit = 30}) {
+/// 번지 위치 색인: 약 1 km 칸마다 번지 목록. 가까운 도로명주소를 빨리 찾음 (검색 스레드가 한 번 만들어 둠)
+class AddressGrid {
+  final List<String> _regions, _streetName;
+  final Uint16List _streetRegion;
+  final Int32List _recStreet;
+  final ByteData _rec;
+  final _cells = HashMap<int, List<int>>();
+
+  static int _key(double lat, double lon) => (lat * 100).floor() * 100000 + (lon * 100).floor();
+
+  AddressGrid._(this._regions, this._streetName, this._streetRegion, this._recStreet, this._rec);
+
+  factory AddressGrid(Uint8List data) {
+    final h = _Reader(Uint8List.sublistView(data, 0, 40))..p = 8;
+    final nRegions = h.u32(), nStreets = h.u32(), nRecs = h.u32();
+    h.p = 24;
+    final regionsOff = h.u32(), streetsOff = h.u32(), recsOff = h.u32();
+    final rr = _Reader(Uint8List.sublistView(data, regionsOff, streetsOff));
+    final regions = [for (var i = 0; i < nRegions; i++) rr.str()];
+    final sr = _Reader(Uint8List.sublistView(data, streetsOff, recsOff));
+    final names = <String>[];
+    final regionOf = Uint16List(nStreets), recStreet = Int32List(nRecs);
+    final rec = ByteData.sublistView(data, recsOff, recsOff + nRecs * 12);
+    final g = AddressGrid._(regions, names, regionOf, recStreet, rec);
+    for (var i = 0; i < nStreets; i++) {
+      names.add(sr.str());
+      regionOf[i] = sr.u16();
+      final start = sr.u32(), count = sr.u32();
+      sr.p += 8;
+      for (var k = start; k < start + count; k++) {
+        recStreet[k] = i;
+        g._cells
+            .putIfAbsent(_key(rec.getInt32(k * 12 + 4, Endian.little) / 1e6, rec.getInt32(k * 12 + 8, Endian.little) / 1e6),
+                () => [])
+            .add(k);
+      }
+    }
+    return g;
+  }
+
+  /// 가장 가까운 도로명주소 ([maxM] 안, 없으면 null). 제목 "정관로 123", 설명 "부산광역시 기장군"
+  SearchHit? nearest(double lat, double lon, {double maxM = 120}) {
+    final r = (maxM / 1000).ceil() + 1; // 칸 약 1 km
+    final cy = (lat * 100).floor(), cx = (lon * 100).floor();
+    var best = maxM;
+    int? bk;
+    for (var dy = -r; dy <= r; dy++) {
+      for (var dx = -r; dx <= r; dx++) {
+        for (final k in _cells[(cy + dy) * 100000 + cx + dx] ?? const <int>[]) {
+          final d = _distM(lat, lon, _rec.getInt32(k * 12 + 4, Endian.little) / 1e6,
+              _rec.getInt32(k * 12 + 8, Endian.little) / 1e6);
+          if (d < best) (best, bk) = (d, k);
+        }
+      }
+    }
+    final k = bk;
+    if (k == null) return null;
+    final st = _recStreet[k];
+    return SearchHit('${_streetName[st]} ${_numLabel(_rec.getUint16(k * 12, Endian.little), _rec.getUint16(k * 12 + 2, Endian.little))}',
+        _regions[_streetRegion[st]], _rec.getInt32(k * 12 + 4, Endian.little) / 1e6,
+        _rec.getInt32(k * 12 + 8, Endian.little) / 1e6);
+  }
+
+  /// 장소 설명에 붙일 위치: 300 m 안에 주소가 있으면 "지역 도로명주소", 3 km 안이면 "지역"
+  String? describe(double lat, double lon) {
+    final a = nearest(lat, lon, maxM: 300);
+    if (a != null) return [a.detail, a.title].where((t) => t.isNotEmpty).join(' ');
+    final r = nearest(lat, lon, maxM: 3000)?.detail;
+    return r == null || r.isEmpty ? null : r;
+  }
+}
+
+/// 메모리에 올린 자료([data] = 파일 전체)에서 찾기. [grid]가 있으면 장소마다 지역·도로명주소를 붙임
+/// (없으면 장소가 나올 때 만듦)
+List<SearchHit> searchIndex(Uint8List data, String query,
+    {double? lat, double? lon, int limit = 30, AddressGrid? grid}) {
   Uint8List read(int off, int len) => Uint8List.sublistView(data, off, off + len);
 
   final h = _Reader(read(0, 40));
@@ -329,7 +405,9 @@ List<SearchHit> searchIndex(Uint8List data, String query, {double? lat, double? 
     }
   } else {
     for (final r in local.isEmpty ? roads : local) {
-      hits.add((2 + r.$1, dist(r.$6, r.$7), SearchHit(r.$2, r.$3.isEmpty ? '도로' : '도로 · ${r.$3}', r.$6, r.$7)));
+      // 이름이 같으면 먼저, 앞부분이 같거나 들어 있으면 가까운 순으로 섞음
+      hits.add((r.$1 == 0 ? 2 : 3, dist(r.$6, r.$7),
+          SearchHit(r.$2, r.$3.isEmpty ? '도로' : '도로 · ${r.$3}', r.$6, r.$7)));
     }
   }
 
@@ -354,7 +432,8 @@ List<SearchHit> searchIndex(Uint8List data, String query, {double? lat, double? 
         }
         continue;
       }
-      hits.add((2 + rank, dist(la, lo), SearchHit(name, placeKinds[kind < placeKinds.length ? kind : 0], la, lo)));
+      hits.add((rank == 0 ? 2 : 3, dist(la, lo),
+          SearchHit(name, placeKinds[kind < placeKinds.length ? kind : 0], la, lo, place: true)));
       if (hits.length > 20000) break;
     }
   }
@@ -367,6 +446,16 @@ List<SearchHit> searchIndex(Uint8List data, String query, {double? lat, double? 
     if (!seen.add('${h.$3.title}|${h.$3.detail}')) continue;
     out.add(h.$3);
     if (out.length >= limit) break;
+  }
+  // 장소: "가게" -> "가게 · 부산광역시 기장군 정관로 123" (어느 동네인지)
+  if (out.any((h) => h.place)) {
+    final g = grid ?? AddressGrid(data);
+    for (var i = 0; i < out.length; i++) {
+      final h = out[i];
+      if (!h.place) continue;
+      final where = g.describe(h.lat, h.lon);
+      if (where != null) out[i] = SearchHit(h.title, '${h.detail} · $where', h.lat, h.lon, exact: h.exact, place: true);
+    }
   }
   return out;
 }
@@ -521,6 +610,8 @@ class AddressSearcher {
 
   static void _serve((String, SendPort) a) {
     final data = File(a.$1).readAsBytesSync();
+    AddressGrid? grid; // 처음 필요할 때 만들어 계속 씀
+    AddressGrid g() => grid ??= AddressGrid(data);
     final inbox = ReceivePort();
     a.$2.send(inbox.sendPort);
     inbox.listen((m) {
@@ -528,9 +619,9 @@ class AddressSearcher {
       final (q, lat, lon, reply) = m as (String?, double?, double?, SendPort);
       try {
         reply.send(switch (q) {
-          null => nearestAddress(data, lat!, lon!),
+          null => g().nearest(lat!, lon!),
           _placeAsk => nearestPlace(data, lat!, lon!),
-          _ => searchIndex(data, q, lat: lat, lon: lon),
+          _ => searchIndex(data, q, lat: lat, lon: lon, grid: g()),
         });
       } catch (e) {
         reply.send('$e');

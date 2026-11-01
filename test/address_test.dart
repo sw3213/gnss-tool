@@ -77,7 +77,8 @@ void main() {
 
   test('finds places by name, ignoring spaces', () {
     expect(searchAddress(path, '정관 박물관').first.title, '정관박물관');
-    expect(searchAddress(path, '구목정공원').first.detail, '공원');
+    // 장소에는 어느 동네인지 붙음 (300 m 안에 주소가 없어 지역만)
+    expect(searchAddress(path, '구목정공원').first.detail, '공원 · 부산광역시 기장군');
     final r = searchAddress(path, '정관', lat: 35.32, lon: 129.17);
     expect(r.map((h) => h.title), containsAll(['정관로', '정관박물관']));
     expect(searchAddress(path, '없는곳'), isEmpty);
@@ -110,5 +111,18 @@ void main() {
     expect(identical(await AddressSearcher.open(path), s), isTrue);
     expect((await s.search('정관로 123')).first.title, '정관로 123');
     expect((await s.search('관악산')).first.detail, '산');
+  });
+
+  test('nearer places come before farther ones that merely start with the query', () {
+    final b = AddressIndexBuilder()
+      ..addPlace('삼익2차아파트', 10, 35.80, 128.60) // 멀리 (앞부분이 같음)
+      ..addPlace('석사삼익2차아파트', 10, 37.86, 127.74) // 가까이 (가운데 들어 있음)
+      ..addPlace('삼익2차', 10, 36.50, 127.50) // 이름이 똑같음 -> 맨 앞
+      ..addAddress('공지로', '100', '강원특별자치도 춘천시', 37.861, 127.741);
+    final p = '${Directory.systemTemp.createTempSync('addr2').path}/t.gad';
+    b.write(p);
+    final r = searchAddress(p, '삼익2차', lat: 37.86, lon: 127.74);
+    expect(r.map((h) => h.title), ['삼익2차', '석사삼익2차아파트', '삼익2차아파트']);
+    expect(r[1].detail, '건물 · 강원특별자치도 춘천시 공지로 100');
   });
 }
