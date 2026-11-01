@@ -366,6 +366,36 @@ List<SearchHit> searchIndex(Uint8List data, String query, {double? lat, double? 
   return out;
 }
 
+/// [lat]/[lon]에서 가장 가까운 도로명주소 (지도에서 누른 곳의 주소). [maxM] 넘게 멀면 null
+SearchHit? nearestAddress(Uint8List data, double lat, double lon, {double maxM = 120}) {
+  final h = _Reader(Uint8List.sublistView(data, 0, 40))..p = 8;
+  final nRegions = h.u32(), nStreets = h.u32();
+  h.p = 24;
+  final regionsOff = h.u32(), streetsOff = h.u32(), recsOff = h.u32();
+  final rr = _Reader(Uint8List.sublistView(data, regionsOff, streetsOff));
+  final regions = [for (var i = 0; i < nRegions; i++) rr.str()];
+  final sr = _Reader(Uint8List.sublistView(data, streetsOff, recsOff));
+  final rec = ByteData.sublistView(data, recsOff);
+  var best = maxM;
+  SearchHit? hit;
+  for (var i = 0; i < nStreets; i++) {
+    final name = sr.str();
+    final region = sr.u16(), start = sr.u32(), count = sr.u32(), la = sr.i32() / 1e6, lo = sr.i32() / 1e6;
+    if (_distM(lat, lon, la, lo) > 20000) continue; // 도로 조각은 지도 칸(약 10 km) 안에 있음
+    for (var k = start; k < start + count; k++) {
+      final o = k * 12;
+      final rla = rec.getInt32(o + 4, Endian.little) / 1e6, rlo = rec.getInt32(o + 8, Endian.little) / 1e6;
+      final d = _distM(lat, lon, rla, rlo);
+      if (d < best) {
+        best = d;
+        final a = rec.getUint16(o, Endian.little), b = rec.getUint16(o + 2, Endian.little);
+        hit = SearchHit('$name ${_numLabel(a, b)}', regions[region], rla, rlo);
+      }
+    }
+  }
+  return hit;
+}
+
 typedef _Road = (int rank, String name, String region, int start, int count, double la, double lo);
 
 String _numLabel(int a, int b) => b == 0 ? '$a' : '$a-$b';
@@ -437,12 +467,18 @@ class AddressSearcher {
     return _open = AddressSearcher._(path, to);
   }
 
-  Future<List<SearchHit>> search(String query, {double? lat, double? lon}) async {
+  Future<List<SearchHit>> search(String query, {double? lat, double? lon}) async =>
+      await _ask((query, lat, lon)) as List<SearchHit>;
+
+  /// 가장 가까운 도로명주소 (없으면 null)
+  Future<SearchHit?> nearest(double lat, double lon) async => await _ask((null, lat, lon)) as SearchHit?;
+
+  Future<Object?> _ask((String?, double?, double?) q) async {
     final reply = ReceivePort();
-    _to.send((query, lat, lon, reply.sendPort));
+    _to.send((q.$1, q.$2, q.$3, reply.sendPort));
     final r = await reply.first;
     if (r is String) throw FormatException(r);
-    return r as List<SearchHit>;
+    return r;
   }
 
   static void _serve((String, SendPort) a) {
@@ -451,9 +487,9 @@ class AddressSearcher {
     a.$2.send(inbox.sendPort);
     inbox.listen((m) {
       if (m == null) return inbox.close();
-      final (q, lat, lon, reply) = m as (String, double?, double?, SendPort);
+      final (q, lat, lon, reply) = m as (String?, double?, double?, SendPort);
       try {
-        reply.send(searchIndex(data, q, lat: lat, lon: lon));
+        reply.send(q == null ? nearestAddress(data, lat!, lon!) : searchIndex(data, q, lat: lat, lon: lon));
       } catch (e) {
         reply.send('$e');
       }

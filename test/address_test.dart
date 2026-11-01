@@ -83,6 +83,15 @@ void main() {
     expect(r.single.lat, closeTo(35.33, 1e-6));
   });
 
+  test('nearest road-name address of a tapped spot', () async {
+    final data = File(path).readAsBytesSync();
+    final h = nearestAddress(data, 35.32101, 129.17801)!;
+    expect(h.title, '정관로 123');
+    expect(h.detail, '부산광역시 기장군');
+    expect(nearestAddress(data, 36.0, 128.0), isNull); // 120 m 안에 주소 없음
+    expect((await (await AddressSearcher.open(path)).nearest(33.4580, 126.9300))!.title, '일출로 284-12');
+  });
+
   test('search thread keeps the data loaded', () async {
     final s = await AddressSearcher.open(path);
     expect(identical(await AddressSearcher.open(path), s), isTrue);

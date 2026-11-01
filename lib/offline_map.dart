@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -715,20 +714,6 @@ const _meLayers = [
       'circle-stroke-width': 3,
     },
   },
-  // 바라보는 방향: 파란 부채꼴 + 작은 삼각형 (그림은 MapControl._headingImage, 북쪽이 0°)
-  {
-    'id': 'me-heading',
-    'type': 'symbol',
-    'source': 'me',
-    'filter': ['has', 'heading'],
-    'layout': {
-      'icon-image': 'me-heading',
-      'icon-rotate': ['get', 'heading'],
-      'icon-rotation-alignment': 'map',
-      'icon-allow-overlap': true,
-      'icon-ignore-placement': true,
-    },
-  },
   {
     'id': 'me',
     'type': 'circle',
@@ -805,7 +790,6 @@ class MapControl {
 
   void _styleLoaded() {
     _ready = true;
-    _headingImage().then((b) => _ctl?.addImage('me-heading', b)).catchError((Object _) {});
     _drawMe();
     if (tilted.value) _show3dBuildings();
     _ctl?.setGeoJsonSource('track', _track);
@@ -843,6 +827,7 @@ class MapControl {
   List<String> _layerIds = []; // 지금 스타일의 레이어 id (MapPage가 채움)
 
   MapControl() {
+    camera.addListener(_onCameraForHeading);
     _layersFile().then((f) {
       if (!f.existsSync()) return;
       try {
@@ -921,55 +906,58 @@ class MapControl {
   }
 
   // ---- 내 위치 점 + 바라보는 방향 ----
-  double? _heading, _drawnHeading;
+  double? _heading, _drawnHeading, _drawnZoom;
 
+  /// 내 위치 점과, 방위를 알면 그 방향 부채꼴(반지름 40 px)·삼각형. 화면 픽셀을 지금 확대 단계의 미터로 바꿔 그림
   void _drawMe() {
-    final me = _me;
+    final me = _me, h = _heading, zoom = camera.value?.zoom;
     if (!_ready || me == null) return;
-    _drawnHeading = _heading;
+    _drawnHeading = h;
+    _drawnZoom = zoom;
+    final (lat, lon) = me;
+    final mPerPx = 78271.517 * math.cos(lat * math.pi / 180) / math.pow(2, zoom ?? 16);
+    List<double> at(double px, double deg) {
+      final r = px * mPerPx, b = deg * math.pi / 180;
+      return [lon + r * math.sin(b) / (111320 * math.cos(lat * math.pi / 180)), lat + r * math.cos(b) / 111320];
+    }
+
+    Map<String, dynamic> poly(String part, List<List<double>> ring) => {
+          'type': 'Feature',
+          'geometry': {
+            'type': 'Polygon',
+            'coordinates': [
+              [...ring, ring.first]
+            ]
+          },
+          'properties': {'part': part},
+        };
     _ctl?.setGeoJsonSource('me', {
       'type': 'FeatureCollection',
       'features': [
+        if (h != null) ...[
+          poly('fan', [
+            [lon, lat],
+            for (var a = -30; a <= 30; a += 10) at(42, h + a),
+          ]),
+          poly('tip', [at(22, h), at(12, h - 28), at(12, h + 28)]),
+        ],
         {
           'type': 'Feature',
           'geometry': {
             'type': 'Point',
-            'coordinates': [me.$2, me.$1]
+            'coordinates': [lon, lat]
           },
-          'properties': <String, dynamic>{if (_heading != null) 'heading': _heading},
-        }
+          'properties': <String, dynamic>{},
+        },
       ],
     });
   }
 
-  static Future<Uint8List>? _headingPng;
-
-  /// 방향 그림 (150 px, 가운데가 내 위치). 폰 화면 밀도로 줄어 약 50 dp로 보임
-  static Future<Uint8List> _headingImage() => _headingPng ??= () async {
-        const s = 150.0, c = Offset(s / 2, s / 2), blue = Color(0xFF3B6CF6);
-        final rec = ui.PictureRecorder();
-        final canvas = Canvas(rec);
-        final fan = Path()
-          ..moveTo(c.dx, c.dy)
-          ..arcTo(Rect.fromCircle(center: c, radius: s / 2), -math.pi / 2 - math.pi / 6, math.pi / 3, false)
-          ..close();
-        canvas.drawPath(fan, Paint()..shader = ui.Gradient.radial(c, s / 2, [blue.withAlpha(150), blue.withAlpha(0)]));
-        final tri = Path()
-          ..moveTo(c.dx, c.dy - 50)
-          ..lineTo(c.dx - 13, c.dy - 30)
-          ..lineTo(c.dx + 13, c.dy - 30)
-          ..close();
-        canvas.drawPath(
-            tri,
-            Paint()
-              ..color = Colors.white
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = 6
-              ..strokeJoin = StrokeJoin.round);
-        canvas.drawPath(tri, Paint()..color = blue);
-        final img = await rec.endRecording().toImage(s.toInt(), s.toInt());
-        return (await img.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
-      }();
+  /// 확대·축소하면 부채꼴 크기가 화면에서 그대로 보이게 다시 그림
+  void _onCameraForHeading() {
+    final z = camera.value?.zoom, d = _drawnZoom;
+    if (_heading != null && z != null && (d == null || (z - d).abs() > 0.15)) _drawMe();
+  }
 
   /// 나침반 방위가 바뀔 때 (진행 방향 위 모드일 때만 지도를 돌림)
   void onHeading(double deg) {
