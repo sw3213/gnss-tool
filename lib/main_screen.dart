@@ -319,14 +319,14 @@ class _MainScreenState extends State<MainScreen> {
     _onLongPress(h.lat, h.lon, name: h.title);
   }
 
-  /// 가장 가까운 도로명주소 (주소 검색 자료가 없거나 120 m 안에 주소가 없으면 null)
-  Future<SearchHit?> _addressNear(double lat, double lon) async {
+  /// 주소 검색 자료로 묻기 (자료가 없거나 실패하면 null)
+  Future<SearchHit?> _askAddressData(Future<SearchHit?> Function(AddressSearcher a) ask) async {
     final store = MapStore.instance;
     final p = store.installed.value.where((p) => p.kind == 'address').firstOrNull;
     final path = p == null ? null : store.fileOf(p.id);
     if (path == null) return null;
     try {
-      return await (await AddressSearcher.open(path)).nearest(lat, lon);
+      return await ask(await AddressSearcher.open(path));
     } catch (_) {
       return null;
     }
@@ -337,7 +337,8 @@ class _MainScreenState extends State<MainScreen> {
   void _onLongPress(double lat, double lon, {String? name, String? kind}) {
     final s = widget.snap.value;
     final elev = widget.analysis.elevationAt(lat, lon);
-    final address = _addressNear(lat, lon);
+    final address = _askAddressData((a) => a.nearest(lat, lon)); // 가장 가까운 도로명주소 (120 m 안)
+    final place = _askAddressData((a) => a.nearestPlaceAt(lat, lon)); // 그 자리 건물·가게 이름 (40 m 안)
     widget.map.setPick(lat, lon); // 메뉴가 열려 있는 동안 고른 곳에 빨간 점
     const sub = TextStyle(fontSize: 13, color: Colors.white70);
     showModalBottomSheet<void>(
@@ -346,11 +347,28 @@ class _MainScreenState extends State<MainScreen> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(
             leading: const Icon(Icons.push_pin_outlined, color: Colors.redAccent),
-            title: Text.rich(TextSpan(children: [
-              TextSpan(text: name ?? '선택한 곳'),
-              if (kind != null) TextSpan(text: '  $kind', style: const TextStyle(fontSize: 13, color: Colors.white60)),
-            ])),
+            // 이름을 모르면(길게 누른 곳) 그 자리 건물 이름을 제목으로
+            title: FutureBuilder<SearchHit?>(
+              future: place,
+              builder: (_, p) {
+                final pl = name == null ? p.data : null;
+                final k = kind ?? pl?.detail;
+                return Text.rich(TextSpan(children: [
+                  TextSpan(text: name ?? pl?.title ?? '선택한 곳'),
+                  if (k != null) TextSpan(text: '  $k', style: const TextStyle(fontSize: 13, color: Colors.white60)),
+                ]));
+              },
+            ),
             subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              // 주소로 찾은 곳: 그 자리 건물 이름도 (예: 입춘로 45 -> ○○빌딩)
+              if (name != null)
+                FutureBuilder<SearchHit?>(
+                  future: place,
+                  builder: (_, p) => p.data == null || p.data!.title == name
+                      ? const SizedBox.shrink()
+                      : Text('${p.data!.title} · ${p.data!.detail}',
+                          style: const TextStyle(fontSize: 14, color: Colors.white)),
+                ),
               FutureBuilder<SearchHit?>(
                 future: address,
                 builder: (_, a) => a.data == null

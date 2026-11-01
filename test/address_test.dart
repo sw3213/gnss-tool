@@ -98,6 +98,11 @@ void main() {
     expect(h.detail, '부산광역시 기장군');
     expect(nearestAddress(data, 36.0, 128.0), isNull); // 120 m 안에 주소 없음
     expect((await (await AddressSearcher.open(path)).nearest(33.4580, 126.9300))!.title, '일출로 284-12');
+    final place = nearestPlace(data, 35.3251, 129.1801)!; // 정관박물관 옆
+    expect(place.title, '정관박물관');
+    expect(place.detail, '관광');
+    expect(nearestPlace(data, 35.3300, 129.1700), isNull); // 도로(구연방곡로)는 빼고, 40 m 안에 없음
+    expect((await (await AddressSearcher.open(path)).nearestPlaceAt(37.4440, 126.9640)), isNull); // 산은 뺌
   });
 
   test('search thread keeps the data loaded', () async {

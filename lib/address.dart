@@ -371,6 +371,33 @@ List<SearchHit> searchIndex(Uint8List data, String query, {double? lat, double? 
   return out;
 }
 
+/// [lat]/[lon]에서 가장 가까운 이름 있는 건물·가게·시설 (도로·지명·산은 빼고). [maxM] 넘게 멀면 null
+/// 결과: 제목 = 이름, 설명 = 종류 (건물, 가게, 학교…)
+SearchHit? nearestPlace(Uint8List data, double lat, double lon, {double maxM = 40}) {
+  final h = _Reader(Uint8List.sublistView(data, 0, 40))..p = 20;
+  final nPlaces = h.u32();
+  h.p = 36;
+  final placesOff = h.u32();
+  final pr = _Reader(Uint8List.sublistView(data, placesOff));
+  const skip = {1, 6, 14}; // 산, 지명, 도로
+  final dLat = maxM / 111320, dLon = maxM / (111320 * cos(lat * pi / 180));
+  var best = maxM;
+  SearchHit? hit;
+  for (var i = 0; i < nPlaces; i++) {
+    final n = pr.u8(), at = pr.p;
+    pr.p += n;
+    final kind = pr.u8(), la = pr.i32() / 1e6, lo = pr.i32() / 1e6;
+    if ((la - lat).abs() > dLat || (lo - lon).abs() > dLon || skip.contains(kind)) continue;
+    final d = _distM(lat, lon, la, lo);
+    if (d < best) {
+      best = d;
+      hit = SearchHit(utf8.decode(Uint8List.sublistView(pr.d, at, at + n)),
+          placeKinds[kind < placeKinds.length ? kind : 0], la, lo);
+    }
+  }
+  return hit;
+}
+
 /// [lat]/[lon]에서 가장 가까운 도로명주소 (지도에서 누른 곳의 주소). [maxM] 넘게 멀면 null
 SearchHit? nearestAddress(Uint8List data, double lat, double lon, {double maxM = 120}) {
   final h = _Reader(Uint8List.sublistView(data, 0, 40))..p = 8;
@@ -478,6 +505,12 @@ class AddressSearcher {
   /// 가장 가까운 도로명주소 (없으면 null)
   Future<SearchHit?> nearest(double lat, double lon) async => await _ask((null, lat, lon)) as SearchHit?;
 
+  /// 가장 가까운 이름 있는 건물·가게 (40 m 안, 없으면 null)
+  Future<SearchHit?> nearestPlaceAt(double lat, double lon) async =>
+      await _ask((_placeAsk, lat, lon)) as SearchHit?;
+
+  static const _placeAsk = '\u0000place';
+
   Future<Object?> _ask((String?, double?, double?) q) async {
     final reply = ReceivePort();
     _to.send((q.$1, q.$2, q.$3, reply.sendPort));
@@ -494,7 +527,11 @@ class AddressSearcher {
       if (m == null) return inbox.close();
       final (q, lat, lon, reply) = m as (String?, double?, double?, SendPort);
       try {
-        reply.send(q == null ? nearestAddress(data, lat!, lon!) : searchIndex(data, q, lat: lat, lon: lon));
+        reply.send(switch (q) {
+          null => nearestAddress(data, lat!, lon!),
+          _placeAsk => nearestPlace(data, lat!, lon!),
+          _ => searchIndex(data, q, lat: lat, lon: lon),
+        });
       } catch (e) {
         reply.send('$e');
       }
