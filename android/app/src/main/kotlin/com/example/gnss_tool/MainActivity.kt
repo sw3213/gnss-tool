@@ -388,7 +388,7 @@ class MainActivity : FlutterActivity() {
             var decl = declination()
             var declAt = System.currentTimeMillis()
             var lastSent = 0L
-            var lastDeg = -1000.0
+            var lastDeg = Double.NaN // 아직 안 보냄
 
             override fun onSensorChanged(e: SensorEvent) {
                 SensorManager.getRotationMatrixFromVector(rot, e.values)
@@ -399,8 +399,12 @@ class MainActivity : FlutterActivity() {
                     declAt = now
                 }
                 val deg = ((Math.toDegrees(orient[0].toDouble()) + decl + 360) % 360)
-                var diff = Math.abs(deg - lastDeg)
-                if (diff > 180) diff = 360 - diff
+                // 두 방위 사이 각도 (0~180°). 처음 값은 무조건 보냄
+                // (예전엔 처음 기준값 -1000°가 계산을 음수로 만들어 방위가 한 번도 안 나갔음)
+                val diff = if (lastDeg.isNaN()) 360.0 else {
+                    val d = ((deg - lastDeg) % 360 + 360) % 360
+                    if (d > 180) 360 - d else d
+                }
                 // 초당 최대 10번, 1° 이상 바뀔 때만 (화면 갱신·배터리 절약)
                 if (now - lastSent >= 100 && diff >= 1) {
                     events.success(deg)
