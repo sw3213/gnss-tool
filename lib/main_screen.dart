@@ -639,13 +639,17 @@ class _MainScreenState extends State<MainScreen> {
             child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
               _GpsStatusChip(snap: widget.snap, sourceLabel: widget.sourceLabel),
               const SizedBox(height: 10),
-              _CompassButton(map: widget.map, heading: widget.heading),
-              const SizedBox(height: 6),
-              // "전방 내리막 -5m · -4%" (바라보는 방향 100 m 앞)
-              ValueListenableBuilder<String?>(
-                valueListenable: widget.analysis.slope,
-                builder: (_, s, __) => s == null
-                    ? const SizedBox.shrink()
+              // 메뉴를 펼치면 방위·전방 경사 글씨는 숨김 (메뉴 이름표와 겹치지 않게)
+              ValueListenableBuilder<bool>(
+                valueListenable: _menuOpen,
+                builder: (_, open, __) => Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                  _CompassButton(map: widget.map, heading: widget.heading, showLabel: !open),
+                  const SizedBox(height: 6),
+                  // "전방 내리막 -5m · -4%" (바라보는 방향 100 m 앞)
+                  ValueListenableBuilder<String?>(
+                    valueListenable: widget.analysis.slope,
+                    builder: (_, s, __) => s == null || open
+                        ? const SizedBox.shrink()
                     : _MapChip(
                         icon: s.contains('오르막')
                             ? Icons.north_east
@@ -654,6 +658,8 @@ class _MainScreenState extends State<MainScreen> {
                                 : Icons.east,
                         text: s,
                       ),
+                  ),
+                ]),
               ),
             ]),
           ),
@@ -841,7 +847,8 @@ class _GpsStatusChip extends StatelessWidget {
 class _CompassButton extends StatelessWidget {
   final MapControl map;
   final ValueListenable<double?> heading;
-  const _CompassButton({required this.map, required this.heading});
+  final bool showLabel; // 아래 방위 글씨 (메뉴가 펼쳐져 있으면 숨김)
+  const _CompassButton({required this.map, required this.heading, this.showLabel = true});
 
   @override
   Widget build(BuildContext context) {
@@ -868,7 +875,7 @@ class _CompassButton extends StatelessWidget {
       const SizedBox(height: 6),
       ValueListenableBuilder<double?>(
         valueListenable: heading,
-        builder: (_, h, __) => h == null
+        builder: (_, h, __) => h == null || !showLabel
             ? const SizedBox.shrink()
             : Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),

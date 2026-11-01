@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -700,6 +701,7 @@ const _meLayers = [
     'id': 'me-acc',
     'type': 'circle',
     'source': 'me',
+    'filter': ['==', ['geometry-type'], 'Point'],
     'paint': {'circle-radius': 18, 'circle-color': '#3b6cf6', 'circle-opacity': 0.15},
   },
   // 길게 누른 곳·검색한 곳 (메뉴가 열려 있는 동안): 빨간 점 + 흰 테두리
@@ -714,10 +716,25 @@ const _meLayers = [
       'circle-stroke-width': 3,
     },
   },
+  // 바라보는 방향: 점 앞쪽 화살표 하나. 그림(MapControl._arrowImage)은 한 번만 올리고 방위가 바뀌면 돌리기만 함
+  {
+    'id': 'me-heading',
+    'type': 'symbol',
+    'source': 'me',
+    'layout': {
+      'icon-image': 'me-heading',
+      'icon-rotate': 0,
+      'icon-rotation-alignment': 'map',
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+      'visibility': 'none',
+    },
+  },
   {
     'id': 'me',
     'type': 'circle',
     'source': 'me',
+    'filter': ['==', ['geometry-type'], 'Point'],
     'paint': {
       'circle-radius': 7,
       'circle-color': '#3b6cf6',
@@ -824,6 +841,12 @@ class MapControl {
 
   void _styleLoaded() {
     _ready = true;
+    _arrowReady = false;
+    _arrowImage().then((b) async {
+      await _ctl?.addImage('me-heading', b);
+      _arrowReady = true;
+      _showArrow();
+    }).catchError((Object _) {});
     _drawMe();
     if (tilted.value) _show3dBuildings();
     _ctl?.setGeoJsonSource('track', _track);
@@ -861,7 +884,6 @@ class MapControl {
   List<String> _layerIds = []; // 지금 스타일의 레이어 id (MapPage가 채움)
 
   MapControl() {
-    camera.addListener(_onCameraForHeading);
     _layersFile().then((f) {
       if (!f.existsSync()) return;
       try {
@@ -940,64 +962,78 @@ class MapControl {
   }
 
   // ---- 내 위치 점 + 바라보는 방향 ----
-  double? _heading, _drawnHeading, _drawnZoom;
+  double? _heading, _shownHeading;
+  bool _arrowReady = false;
 
-  /// 내 위치 점과, 방위를 알면 그 방향 부채꼴(반지름 40 px)·삼각형. 화면 픽셀을 지금 확대 단계의 미터로 바꿔 그림
+  /// 내 위치 점 (GPS 위치가 올 때만 다시 보냄)
   void _drawMe() {
-    final me = _me, h = _heading, zoom = camera.value?.zoom;
+    final me = _me;
     if (!_ready || me == null) return;
-    _drawnHeading = h;
-    _drawnZoom = zoom;
-    final (lat, lon) = me;
-    final mPerPx = 78271.517 * math.cos(lat * math.pi / 180) / math.pow(2, zoom ?? 16);
-    List<double> at(double px, double deg) {
-      final r = px * mPerPx, b = deg * math.pi / 180;
-      return [lon + r * math.sin(b) / (111320 * math.cos(lat * math.pi / 180)), lat + r * math.cos(b) / 111320];
-    }
-
-    Map<String, dynamic> poly(String part, List<List<double>> ring) => {
-          'type': 'Feature',
-          'geometry': {
-            'type': 'Polygon',
-            'coordinates': [
-              [...ring, ring.first]
-            ]
-          },
-          'properties': {'part': part},
-        };
     _ctl?.setGeoJsonSource('me', {
       'type': 'FeatureCollection',
       'features': [
-        if (h != null) ...[
-          poly('fan', [
-            [lon, lat],
-            for (var a = -30; a <= 30; a += 10) at(42, h + a),
-          ]),
-          poly('tip', [at(22, h), at(12, h - 28), at(12, h + 28)]),
-        ],
         {
           'type': 'Feature',
           'geometry': {
             'type': 'Point',
-            'coordinates': [lon, lat]
+            'coordinates': [me.$2, me.$1]
           },
           'properties': <String, dynamic>{},
-        },
+        }
       ],
     });
   }
 
-  /// 확대·축소하면 부채꼴 크기가 화면에서 그대로 보이게 다시 그림
-  void _onCameraForHeading() {
-    final z = camera.value?.zoom, d = _drawnZoom;
-    if (_heading != null && z != null && (d == null || (z - d).abs() > 0.15)) _drawMe();
+  /// 화살표를 방위만큼 돌려 보이기 (방위를 모르면 숨김). 위치 자료는 건드리지 않음
+  void _showArrow() {
+    final h = _heading;
+    if (!_ready || !_arrowReady) return;
+    _shownHeading = h;
+    // setLayerProperties는 빠진 속성을 기본값으로 되돌리므로 모두 다시 줌
+    _ctl
+        ?.setLayerProperties(
+            'me-heading',
+            SymbolLayerProperties(
+              iconImage: 'me-heading',
+              iconRotate: h ?? 0,
+              iconRotationAlignment: 'map',
+              iconAllowOverlap: true,
+              iconIgnorePlacement: true,
+              visibility: h == null ? 'none' : 'visible',
+            ))
+        .catchError((Object _) {});
   }
+
+  static Future<Uint8List>? _arrowPng;
+
+  /// 화살표 그림 (150 px, 가운데가 내 위치, 위쪽이 북). 폰 화면 밀도로 줄어 약 50 dp로 보임
+  static Future<Uint8List> _arrowImage() => _arrowPng ??= () async {
+        const s = 150.0, cx = s / 2, cy = s / 2;
+        final rec = ui.PictureRecorder();
+        final canvas = Canvas(rec);
+        final arrow = Path()
+          ..moveTo(cx, cy - 62)
+          ..lineTo(cx - 22, cy - 30)
+          ..lineTo(cx, cy - 38)
+          ..lineTo(cx + 22, cy - 30)
+          ..close();
+        canvas.drawPath(
+            arrow,
+            Paint()
+              ..color = Colors.white
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 7
+              ..strokeJoin = StrokeJoin.round);
+        canvas.drawPath(arrow, Paint()..color = const Color(0xFF3B6CF6));
+        final img = await rec.endRecording().toImage(s.toInt(), s.toInt());
+        return (await img.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      }();
 
   /// 나침반 방위가 바뀔 때 (진행 방향 위 모드일 때만 지도를 돌림)
   void onHeading(double deg) {
     _heading = deg;
-    final d = _drawnHeading;
-    if (d == null || ((deg - d + 540) % 360 - 180).abs() >= 3) _drawMe(); // 3° 넘게 돌았을 때만 다시 그림
+    final d = _shownHeading;
+    if (d == null || ((deg - d + 540) % 360 - 180).abs() >= 2) _showArrow(); // 2° 넘게 돌았을 때만
     if (headingUp.value) _ctl?.animateCamera(CameraUpdate.bearingTo(deg), duration: const Duration(milliseconds: 200));
   }
 
