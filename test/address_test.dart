@@ -125,4 +125,13 @@ void main() {
     expect(r.map((h) => h.title), ['삼익2차', '석사삼익2차아파트', '삼익2차아파트']);
     expect(r[1].detail, '건물 · 강원특별자치도 춘천시 공지로 100');
   });
+
+  test('bus stops are bus stops, stations get 역', () {
+    expect(placeKind({'highway': 'bus_stop', 'name': '사직역'}), busStopKind);
+    expect(placeKinds[busStopKind], '버스 정류장');
+    expect(placeKind({'railway': 'station', 'name': '사직'}), stationKind);
+    expect(isRailStation({'railway': 'station'}), isTrue);
+    expect(isRailStation({'public_transport': 'station', 'bus': 'yes'}), isFalse); // 버스 터미널
+    expect(placeKind({'highway': 'primary', 'name': '중앙대로'}), 14); // 도로
+  });
 }

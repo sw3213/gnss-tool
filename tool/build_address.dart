@@ -49,9 +49,11 @@ Future<void> main(List<String> args) async {
       final region = [t['addr:province'], t['addr:city'], t['addr:district']].whereType<String>().join(' ');
       b.addAddress(street, num, region, lat, lon);
     }
-    final name = (t['name:ko'] ?? t['name']) as String?;
+    var name = (t['name:ko'] ?? t['name']) as String?;
     final k = name == null ? null : placeKind(t);
     if (name != null && k != null) {
+      // 지도에는 "사직"처럼 "역" 없이 적힌 역이 많음 -> "사직역"으로 찾히게
+      if (k == stationKind && isRailStation(t) && !name.endsWith('역')) name = '$name역';
       b.addPlace(name, k, lat, lon);
       kinds[k]++;
     }

@@ -28,9 +28,16 @@ const addressFormatVersion = 1;
 /// 장소 종류 (파일의 종류 번호 = 목록 순서)
 const placeKinds = [
   '장소', '산', '역', '학교', '병원', '관공서', '지명', '관광', '공원', '가게', '건물', '주차장', '물', '대피소', '도로', //
-  '지하철 출구',
+  '지하철 출구', '버스 정류장',
 ];
 const exitKind = 15; // "강남역 3번 출구" (tool/build_address.dart가 출구마다 가까운 역 이름을 붙임)
+const stationKind = 2, busStopKind = 16;
+
+/// 기차·지하철역인지 (버스 터미널 말고). 이름에 "역"이 없으면 붙여서 저장 ("사직" -> "사직역")
+bool isRailStation(Map<String, dynamic> t) =>
+    t['railway'] == 'station' ||
+    t['railway'] == 'halt' ||
+    (t['public_transport'] == 'station' && (t['subway'] == 'yes' || t['train'] == 'yes' || t['light_rail'] == 'yes'));
 
 /// OSM 태그 -> 장소 종류 번호 (검색에 안 넣을 것은 null)
 int? placeKind(Map<String, dynamic> t) {
@@ -39,7 +46,9 @@ int? placeKind(Map<String, dynamic> t) {
   if (natural == 'peak' || natural == 'saddle' || natural == 'volcano') return 1;
   if (natural == 'spring' || amenity == 'drinking_water') return 12;
   if (amenity == 'shelter' || tourism == 'alpine_hut' || tourism == 'wilderness_hut') return 13;
-  if (g('railway') == 'station' || g('public_transport') == 'station' || g('railway') == 'halt') return 2;
+  // 버스 정류장 (이름이 "사직역"이어도 역이 아님)
+  if (g('highway') == 'bus_stop' || (g('public_transport') == 'platform' && g('bus') == 'yes')) return busStopKind;
+  if (g('railway') == 'station' || g('public_transport') == 'station' || g('railway') == 'halt') return stationKind;
   if (const {'school', 'university', 'college', 'kindergarten'}.contains(amenity)) return 3;
   if (const {'hospital', 'clinic', 'doctors', 'pharmacy', 'dentist'}.contains(amenity)) return 4;
   if (const {'townhall', 'police', 'fire_station', 'post_office', 'courthouse', 'library', 'community_centre'}
