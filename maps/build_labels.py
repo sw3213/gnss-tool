@@ -2,14 +2,17 @@
 
 Protomaps 기본 지도에는 건물 이름이 빠져 있어 아파트 "101동"이 안 보임.
 osmium export로 뽑은 이름 있는 건물·주거 단지 다각형(GeoJSONSeq)을 읽어 가운데 점 하나로 바꿈.
-  kind:  bldg = 건물, complex = 아파트 단지 등 주거 구역 (landuse=residential)
-  name:  전체 이름 ("잠실엘스 101동", "구곡현대2차아파트")
-  short: 동 번호만 ("101동"), 동 번호가 없으면 전체 이름
+  kind:  bldg = 건물, complex = 아파트 단지 등 주거 구역 (landuse=residential), exit = 지하철역 출구
+  name:  전체 이름 ("잠실엘스 101동", "구곡현대2차아파트", "강남역 3번 출구")
+  short: 동 번호만 ("101동"), 출구는 번호만 ("3"), 그 밖에는 전체 이름
   dong:  1 = 동 번호 있음
 
-사용법: python3 build_labels.py areas.geojsons labels.geojsons
+출구는 역·출구 점(stations.geojsons)에서: 출구마다 500 m 안 가장 가까운 역 이름을 붙임
+
+사용법: python3 build_labels.py areas.geojsons labels.geojsons [stations.geojsons]
 """
 import json
+import math
 import re
 import sys
 
@@ -45,9 +48,61 @@ def label_point(geom):
     return best
 
 
-def main(src, dst):
-    counts = {'bldg': 0, 'complex': 0, 'dong': 0}
+EXIT_NO = re.compile(r'(\d+(?:-\d+)?)')
+
+
+def point_of(geom):
+    if geom['type'] == 'Point':
+        return geom['coordinates'][0], geom['coordinates'][1]
+    p = label_point(geom)
+    return None if p is None else (p[0], p[1])
+
+
+def station_exits(path):
+    """역·출구 점 -> [(경도, 위도, "강남역 3번 출구", "3")]. 번호를 모르거나 500 m 안에 역이 없으면 뺌"""
+    stations, exits = [], []
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip().lstrip('\x1e')
+            if not line:
+                continue
+            feat = json.loads(line)
+            tags = feat.get('properties') or {}
+            p = point_of(feat['geometry'])
+            if p is None:
+                continue
+            if tags.get('railway') in ('subway_entrance', 'train_station_entrance'):
+                m = EXIT_NO.search(tags.get('ref') or tags.get('name') or '')
+                if m:
+                    exits.append((p[0], p[1], m.group(1)))
+            elif tags.get('railway') == 'station' or tags.get('public_transport') == 'station':
+                name = tags.get('name:ko') or tags.get('name')
+                if name:
+                    stations.append((p[0], p[1], name))
+    out = []
+    for x, y, no in exits:
+        k = math.cos(math.radians(y))
+        best, bd = None, 500.0
+        for sx, sy, name in stations:
+            d = math.hypot((sx - x) * k, sy - y) * 111320
+            if d < bd:
+                best, bd = name, d
+        if best:
+            station = best if best.endswith('역') else best + '역'
+            out.append((x, y, f'{station} {no}번 출구', no))
+    return out
+
+
+def main(src, dst, stations=None):
+    counts = {'bldg': 0, 'complex': 0, 'dong': 0, 'exit': 0}
     with open(src, encoding='utf-8') as f, open(dst, 'w', encoding='utf-8') as out:
+        for x, y, name, no in station_exits(stations) if stations else []:
+            out.write(json.dumps({
+                'type': 'Feature',
+                'geometry': {'type': 'Point', 'coordinates': [round(x, 6), round(y, 6)]},
+                'properties': {'kind': 'exit', 'name': name, 'short': no, 'dong': 0},
+            }, ensure_ascii=False) + '\n')
+            counts['exit'] += 1
         for line in f:
             line = line.strip().lstrip('\x1e')
             if not line:
@@ -79,4 +134,4 @@ def main(src, dst):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1], sys.argv[2])
+    main(*sys.argv[1:4])

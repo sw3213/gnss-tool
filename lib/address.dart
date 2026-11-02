@@ -26,7 +26,11 @@ double _distM(double la1, double lo1, double la2, double lo2) {
 const addressFormatVersion = 1;
 
 /// 장소 종류 (파일의 종류 번호 = 목록 순서)
-const placeKinds = ['장소', '산', '역', '학교', '병원', '관공서', '지명', '관광', '공원', '가게', '건물', '주차장', '물', '대피소', '도로'];
+const placeKinds = [
+  '장소', '산', '역', '학교', '병원', '관공서', '지명', '관광', '공원', '가게', '건물', '주차장', '물', '대피소', '도로', //
+  '지하철 출구',
+];
+const exitKind = 15; // "강남역 3번 출구" (tool/build_address.dart가 출구마다 가까운 역 이름을 붙임)
 
 /// OSM 태그 -> 장소 종류 번호 (검색에 안 넣을 것은 null)
 int? placeKind(Map<String, dynamic> t) {

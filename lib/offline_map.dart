@@ -282,7 +282,10 @@ Future<String> buildStyle(List<MapPack> packs) async {
       'attribution': '© OpenStreetMap contributors',
     };
   }
-  final nameLayers = [for (final p in names) ..._buildingNameLayers('l_${p.id}')];
+  final nameLayers = [
+    for (final p in names) ..._buildingNameLayers('l_${p.id}'),
+    for (final p in names) ..._exitLayers('l_${p.id}'),
+  ];
 
   // 지형 음영(산 그림자): hillshade.yml이 만든 고도 타일. 고도 색칠 위, 등고선과 같은 높이에 그림
   final shades = [for (final p in packs) if (p.kind == 'hillshade') p];
@@ -468,7 +471,7 @@ List<Map<String, dynamic>> _buildingNameLayers(String s) => [
         'source': s,
         'source-layer': 'bldg',
         'minzoom': 15,
-        'filter': ['!=', ['get', 'kind'], 'complex'],
+        'filter': ['==', ['get', 'kind'], 'bldg'],
         'layout': {
           'text-field': ['step', ['zoom'], ['get', 'short'], 17, ['get', 'name']],
           'text-font': ['NotoSansMedium'],
@@ -486,6 +489,40 @@ List<Map<String, dynamic>> _buildingNameLayers(String s) => [
           'text-halo-color': '#ffffff',
           'text-halo-width': 1.6,
         },
+      },
+    ];
+
+/// 지하철역 출구: 초록 동그라미 안에 번호 ("3"). 누르면 "강남역 3번 출구"
+List<Map<String, dynamic>> _exitLayers(String s) => [
+      {
+        'id': '$s-exit',
+        'type': 'circle',
+        'source': s,
+        'source-layer': 'bldg',
+        'minzoom': 15,
+        'filter': ['==', ['get', 'kind'], 'exit'],
+        'paint': {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 15, 7, 18, 10],
+          'circle-color': '#2b8a3e',
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 1.5,
+        },
+      },
+      {
+        'id': '$s-exit-no',
+        'type': 'symbol',
+        'source': s,
+        'source-layer': 'bldg',
+        'minzoom': 15,
+        'filter': ['==', ['get', 'kind'], 'exit'],
+        'layout': {
+          'text-field': ['get', 'short'],
+          'text-font': ['NotoSansMedium'],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 15, 9, 18, 12],
+          'text-allow-overlap': true,
+          'text-ignore-placement': true,
+        },
+        'paint': {'text-color': '#ffffff'},
       },
     ];
 
@@ -877,6 +914,7 @@ class MapControl {
     (id: 'trails', label: '등산로 강조', icon: Icons.hiking, suffixes: ['-trails']),
     (id: 'pois', label: '장소 아이콘', icon: Icons.place_outlined, suffixes: ['-pois']),
     (id: 'dong', label: '건물·아파트 이름', icon: Icons.apartment, suffixes: ['-dong', '-complex']),
+    (id: 'exit', label: '지하철 출구 번호', icon: Icons.subway_outlined, suffixes: ['-exit', '-exit-no']),
     (id: 'water', label: '수원지 번호', icon: Icons.water_drop_outlined, suffixes: ['water-pt', 'water-num']),
   ];
 
@@ -1644,6 +1682,7 @@ String? kindLabel(String? kind) => switch (kind) {
       'charging_station' => '충전소',
       'bus_stop' || 'bus_station' => '버스 정류장',
       'station' || 'train_station' || 'subway' => '역',
+      'exit' || 'subway_entrance' => '지하철 출구',
       'place_of_worship' => '종교시설',
       'hotel' || 'motel' || 'hostel' || 'guest_house' => '숙박',
       'museum' => '박물관',

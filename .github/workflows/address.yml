@@ -40,7 +40,8 @@ jobs:
 
       - name: Addresses and named places -> GeoJSON
         run: |
-          osmium tags-filter -O -o sel.osm.pbf kr.osm.pbf nwr/addr:housenumber nwr/name
+          osmium tags-filter -O -o sel.osm.pbf kr.osm.pbf nwr/addr:housenumber nwr/name \
+            n/railway=subway_entrance,train_station_entrance
           osmium export -O -f geojsonseq -o features.geojsons sel.osm.pbf
           ls -la features.geojsons
 

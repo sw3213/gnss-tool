@@ -3,10 +3,14 @@ name: Build building labels
 # 아파트 "101동" 같은 건물 이름과 "구곡현대2차아파트" 같은 단지 이름을 OpenStreetMap 한국 데이터(Geofabrik)에서 뽑아
 # 작은 벡터 지도(kr-labels.pmtiles, 레이어 bldg)로 만들어 Release "maps"에 올림.
 # Protomaps 기본 지도는 건물 이름을 넣지 않아서 따로 만듦. 앱은 kind="labels"를 기본 지도 위에 겹침.
-#   bldg: 점, 속성 kind(bldg 건물 / complex 단지), name(전체 이름), short(동 번호만), dong(1 = 동 번호 있음)
+#   bldg: 점, 속성 kind(bldg 건물 / complex 단지 / exit 지하철 출구), name(전체 이름),
+#         short(동 번호만 / 출구 번호만), dong(1 = 동 번호 있음)
 
 on:
   workflow_dispatch:
+  push: # 라벨 종류를 바꾸면 자료도 다시 만듦
+    branches: [main]
+    paths: ['maps/build_labels.py', '.github/workflows/labels.yml']
   schedule:
     - cron: '0 5 1 * *' # 매월 1일 (기본 지도 갱신 뒤)
 
@@ -39,7 +43,11 @@ jobs:
           osmium tags-filter -O -o b.osm.pbf kr.osm.pbf wr/building wr/landuse=residential
           osmium tags-filter -O -o bn.osm.pbf b.osm.pbf w/name,addr:housename r/name,addr:housename
           osmium export -O -f geojsonseq --geometry-types=polygon -o areas.geojsons bn.osm.pbf
-          python3 maps/build_labels.py areas.geojsons labels.geojsons
+          # 지하철역 출구 번호: 출구 점 + 역 (점 또는 건물)
+          osmium tags-filter -O -o st.osm.pbf kr.osm.pbf \
+            n/railway=subway_entrance,train_station_entrance nwr/railway=station nwr/public_transport=station
+          osmium export -O -f geojsonseq -o stations.geojsons st.osm.pbf
+          python3 maps/build_labels.py areas.geojsons labels.geojsons stations.geojsons
 
       - name: Vector tiles
         run: |
