@@ -5,7 +5,7 @@ import 'dart:math' as math;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show HapticFeedback;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData, HapticFeedback;
 import 'package:maplibre_gl/maplibre_gl.dart' show CameraPosition;
 import 'package:path_provider/path_provider.dart';
 
@@ -73,6 +73,14 @@ class MainScreen extends StatefulWidget {
 
   @override
   State<MainScreen> createState() => _MainScreenState();
+}
+
+/// 좌표를 "37.86123, 127.74123" 모양으로 복사 (소수 5자리 ≈ 1 m)
+void copyCoordinates(BuildContext context, double lat, double lon) {
+  final text = '${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}';
+  Clipboard.setData(ClipboardData(text: text));
+  HapticFeedback.lightImpact();
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('좌표를 복사했습니다: $text')));
 }
 
 const _waterColor = Color(0xFF1C7ED6), _emergencyColor = Color(0xFFE8590C); // 수원지 번호: 기본 파랑, 긴급 주황
@@ -389,8 +397,19 @@ class _MainScreenState extends State<MainScreen> {
                           '${directionLabel(bearingDeg(s.lat!, s.lon!, lat, lon))}',
                   ].join('  ·  '),
                   style: sub),
-              Text('${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}',
-                  style: const TextStyle(fontSize: 11, color: Colors.white38)),
+              // 좌표: 누르면 복사 (검색창에 그대로 붙여 넣어 찾을 수 있는 모양)
+              InkWell(
+                onTap: () => copyCoordinates(context, lat, lon),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Text('${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}',
+                        style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                    const SizedBox(width: 6),
+                    const Icon(Icons.copy, size: 16, color: Colors.white70),
+                  ]),
+                ),
+              ),
             ]),
           ),
           ListTile(
@@ -1025,7 +1044,10 @@ class _InfoPanel extends StatelessWidget {
           Expanded(
             child: ValueListenableBuilder<GnssSnapshot>(
               valueListenable: snap,
-              builder: (_, s, __) => _PanelItem(
+              // 누르면 내 위치 좌표 복사
+              builder: (_, s, __) => InkWell(
+                onTap: s.lat == null || s.lon == null ? null : () => copyCoordinates(context, s.lat!, s.lon!),
+                child: _PanelItem(
                 icon: Icons.navigation,
                 iconColor: const Color(0xFF4D7CFE),
                 title: 'GPS 현재 위치',
@@ -1035,6 +1057,7 @@ class _InfoPanel extends StatelessWidget {
                         ? '측위 중'
                         : '측위 대기',
                 valueColor: s.hAcc == null ? null : accuracyColor(s.hAcc),
+              ),
               ),
             ),
           ),
