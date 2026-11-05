@@ -220,6 +220,37 @@ class SearchHit {
   String toString() => '$title ($detail) $lat,$lon';
 }
 
+/// 좌표 읽기: "37.86123, 127.74123", "37.86123 127.74123", "N37.86 E127.74", "북위 37.86 동경 127.74",
+/// "37°51'40.4\"N 127°44'28.4\"E" (도분초). 경도·위도 순서로 써도 한국 범위(경도 > 90)로 알아봄.
+/// [decimals]: 소수 자릿수 (두 수 중 적은 쪽, 도분초는 5로 봄), [errorM]: 그 자릿수로 생기는 최대 오차 (m)
+({double lat, double lon, int decimals, double errorM})? parseCoordinates(String q) {
+  final s = q.trim().replaceAll(RegExp(r'[NnEe북위동경]'), ' ');
+  double? dms(String t) {
+    // 도° 분′(또는 ') 초″(또는 ")
+    final m = RegExp(r'^(\d{1,3})°\s*(\d{1,2})' "[\u2032']" r'\s*(\d{1,2}(?:\.\d+)?)?' '[\u2033"]?\$')
+        .firstMatch(t.trim());
+    if (m == null) return null;
+    return int.parse(m.group(1)!) + int.parse(m.group(2)!) / 60 + (double.tryParse(m.group(3) ?? '') ?? 0) / 3600;
+  }
+
+  double a, b;
+  int decimals;
+  final parts = s.split(RegExp(r'[,\s]+')).where((t) => t.isNotEmpty).toList();
+  final d1 = parts.length == 2 ? dms(parts[0]) : null, d2 = parts.length == 2 ? dms(parts[1]) : null;
+  if (d1 != null && d2 != null) {
+    (a, b, decimals) = (d1, d2, 5);
+  } else {
+    final m = RegExp(r'^(-?\d{1,3}(?:\.(\d+))?)[,\s]+(-?\d{1,3}(?:\.(\d+))?)$').firstMatch(s.trim());
+    if (m == null) return null;
+    a = double.parse(m.group(1)!);
+    b = double.parse(m.group(3)!);
+    decimals = min(m.group(2)?.length ?? 0, m.group(4)?.length ?? 0);
+  }
+  final (lat, lon) = a.abs() > 90 ? (b, a) : (a, b); // 경도를 먼저 썼으면 바꿈
+  if (lat.abs() > 90 || lon.abs() > 180 || decimals == 0) return null; // "12 34" 같은 번호는 좌표 아님
+  return (lat: lat, lon: lon, decimals: decimals, errorM: 111320 * 0.5 * pow(10, -decimals).toDouble());
+}
+
 /// 검색어 나누기: "부산 기장군 정관로 123-4" -> 지역 ["부산", "기장군"], 도로 "정관로", 번지 (123, 4)
 ({List<String> region, String? road, (int, int)? number}) parseQuery(String q) {
   var t = q.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
@@ -359,6 +390,18 @@ class AddressGrid {
 List<SearchHit> searchIndex(Uint8List data, String query,
     {double? lat, double? lon, int limit = 30, AddressGrid? grid}) {
   Uint8List read(int off, int len) => Uint8List.sublistView(data, off, off + len);
+
+  // 위도·경도를 쳤으면 그 자리로 (가장 가까운 주소를 함께)
+  final c = parseCoordinates(query);
+  if (c != null) {
+    final where = (grid ?? AddressGrid(data)).describe(c.lat, c.lon);
+    final err = c.errorM < 1 ? '1 m 미만' : '약 ±${c.errorM < 10 ? c.errorM.toStringAsFixed(0) : (c.errorM / 10).round() * 10} m';
+    return [
+      SearchHit('${c.lat.toStringAsFixed(c.decimals)}, ${c.lon.toStringAsFixed(c.decimals)}',
+          '좌표 · 소수 ${c.decimals}자리 (오차 $err)${where == null ? '' : ' · $where'}', c.lat, c.lon,
+          exact: c.decimals >= 4),
+    ];
+  }
 
   final h = _Reader(read(0, 40));
   if (String.fromCharCodes([h.u8(), h.u8(), h.u8(), h.u8()]) != 'GADR') {

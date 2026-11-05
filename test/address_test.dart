@@ -134,4 +134,22 @@ void main() {
     expect(isRailStation({'public_transport': 'station', 'bus': 'yes'}), isFalse); // 버스 터미널
     expect(placeKind({'highway': 'primary', 'name': '중앙대로'}), 14); // 도로
   });
+
+  test('coordinates', () {
+    final c = parseCoordinates('37.86123, 127.74123')!;
+    expect((c.lat, c.lon, c.decimals), (37.86123, 127.74123, 5));
+    expect(c.errorM, closeTo(0.56, 0.01));
+    expect(parseCoordinates('127.74 37.86')!.lat, 37.86); // 경도 먼저
+    expect(parseCoordinates('N37.861 E127.741')!.decimals, 3);
+    expect(parseCoordinates('북위 37.86 동경 127.74')!.lon, 127.74);
+    final d = parseCoordinates('37°51\'40.4"N 127°44\'28.4"E')!;
+    expect(d.lat, closeTo(37.86122, 1e-5));
+    expect(d.lon, closeTo(127.74122, 1e-5));
+    expect(parseCoordinates('정관로 123'), isNull);
+    expect(parseCoordinates('12 34'), isNull);
+    final r = searchAddress(path, '35.32100, 129.17800').single;
+    expect(r.title, '35.32100, 129.17800');
+    expect(r.detail, '좌표 · 소수 5자리 (오차 1 m 미만) · 부산광역시 기장군 정관로 123');
+    expect(searchAddress(path, '35.32, 129.18').single.detail, startsWith('좌표 · 소수 2자리 (오차 약 ±560 m)'));
+  });
 }
