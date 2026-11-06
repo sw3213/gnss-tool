@@ -1,0 +1,23 @@
+name: Dust shelter API probe (temporary)
+
+# 에어코리아 미세먼지 쉼터 API의 기능 이름·결과 모양 확인용 (임시, 확인 후 삭제)
+on:
+  push:
+    branches: [main-yievoq]
+    paths: ['.github/workflows/dust-probe.yml']
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Try operation names
+        env:
+          KEY: ${{ secrets.DATA_GO_KR_KEY }}
+        run: |
+          base=https://apis.data.go.kr/B552584/ptcShuntPlaceService
+          for op in getShuntPlaceList getPtcShuntPlaceList getShuntPlaceInfo getPtcShuntPlaceInfo getList getShuntPlace getPtcShuntPlace; do
+            echo "=================== $op"
+            curl -sS -m 30 "$base/$op?serviceKey=$KEY&pageNo=1&numOfRows=2&returnType=json" -o r.txt -w 'HTTP %{http_code}\n' || true
+            head -c 1500 r.txt; echo
+          done
