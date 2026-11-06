@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'main.dart' show GnssSnapshot;
 import 'nav.dart';
 import 'offline_map.dart';
+import 'fire.dart';
 import 'terrain.dart';
 import 'water.dart';
 
@@ -27,6 +28,16 @@ List<WaterSource> _findWater((String, double, double, bool) a) {
   }
 }
 
+/// 별도 스레드: 숲·국립공원까지 거리로 불 사용 참고 정보
+FireStatus _findFire((String, double, double) a) {
+  final pm = PmTiles.open(a.$1);
+  try {
+    return fireStatus(pm, a.$2, a.$3);
+  } finally {
+    pm.close();
+  }
+}
+
 class TerrainAnalysis {
   final ValueListenable<GnssSnapshot> snap;
   final ValueListenable<double?> heading;
@@ -39,13 +50,14 @@ class TerrainAnalysis {
   /// 긴급 수원지 포함: 켜면 소류지·저수지·연못 같은 고인 물도 거리 계산에 넣음 (설정은 water_mode.json에 저장)
   final emergencyWater = ValueNotifier<bool>(false);
   final hasDem = ValueNotifier<bool>(false);
+  final fire = ValueNotifier<FireStatus?>(null); // 여기서 불을 피워도 되는지 (참고)
 
   DemFile? _dem;
   String? _demPath, _mapPath;
   Timer? _timer;
   DateTime _slopeAt = DateTime(0);
-  (double, double, DateTime)? _sunFor, _waterFor;
-  bool _waterBusy = false;
+  (double, double, DateTime)? _sunFor, _waterFor, _fireFor;
+  bool _waterBusy = false, _fireBusy = false;
   bool _waterAgain = false; // 계산 중에 긴급 설정이 바뀌면 끝나고 한 번 더
 
   void start() {
@@ -104,7 +116,8 @@ class TerrainAnalysis {
     final mapPath = map == null ? null : store.fileOf(map.id);
     if (mapPath != _mapPath) {
       _mapPath = mapPath;
-      _waterFor = null;
+      _waterFor = _fireFor = null;
+      if (mapPath == null) fire.value = null;
     }
     _periodic();
   }
@@ -145,6 +158,7 @@ class TerrainAnalysis {
 
     // 수원지: 100 m 이상 이동했거나 3분마다. 지도 타일을 여러 장 풀어야 해서 별도 스레드에서
     final mapPath = _mapPath;
+    if (mapPath != null) _updateFire(mapPath, lat, lon, now);
     if (mapPath != null && !_waterBusy && _stale(_waterFor, lat, lon, 100, const Duration(minutes: 3))) {
       _waterBusy = true;
       _waterFor = (lat, lon, now);
@@ -159,6 +173,16 @@ class TerrainAnalysis {
         }
       });
     }
+  }
+
+  /// 불 사용: 50 m 이상 이동했거나 3분마다 (100 m 기준이라 수원지보다 촘촘히)
+  void _updateFire(String mapPath, double lat, double lon, DateTime now) {
+    if (_fireBusy || !_stale(_fireFor, lat, lon, 50, const Duration(minutes: 3))) return;
+    _fireBusy = true;
+    _fireFor = (lat, lon, now);
+    compute(_findFire, (mapPath, lat, lon))
+        .then((f) => fire.value = f, onError: (Object _) {})
+        .whenComplete(() => _fireBusy = false);
   }
 
   /// 고도 데이터의 지면 고도 (m). 고도 데이터가 없으면 null

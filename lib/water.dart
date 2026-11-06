@@ -482,3 +482,51 @@ bool _inside(List<(double, double)> ring, double lat, double lon) {
 
 String waterChipLabel(List<WaterSource> ws) =>
     '수원지 ${distanceLabel(ws.first.distanceM)}${ws.length > 1 ? ' 외 ${ws.length - 1}곳' : ''}';
+
+// ---------------- 면(숲·공원 등)까지 거리 ----------------
+
+/// 면 [rings](바깥 테두리가 첫 번째, 위도·경도)까지 거리 (m). 안에 있으면 0
+double areaDistanceM(List<List<(double, double)>> rings, double lat, double lon) {
+  if (rings.isEmpty) return double.infinity;
+  if (_inside(rings.first, lat, lon) && !rings.skip(1).any((h) => _inside(h, lat, lon))) return 0;
+  final mLat = 111320.0, mLon = 111320.0 * cos(lat * pi / 180);
+  var best = double.infinity;
+  for (final r in rings) {
+    for (var i = 0; i + 1 < r.length; i++) {
+      final (a1, o1) = r[i];
+      final (a2, o2) = r[i + 1];
+      final ax = (o1 - lon) * mLon, ay = (a1 - lat) * mLat, bx = (o2 - lon) * mLon, by = (a2 - lat) * mLat;
+      final l2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
+      final t = l2 == 0 ? 0.0 : (((-ax) * (bx - ax) + (-ay) * (by - ay)) / l2).clamp(0.0, 1.0);
+      final px = ax + (bx - ax) * t, py = ay + (by - ay) * t;
+      best = min(best, sqrt(px * px + py * py));
+    }
+  }
+  return best;
+}
+
+/// 지도 [layer]에서 [match]에 맞는 가장 가까운 면까지 (거리 m, 속성). 안에 있으면 거리 0.
+/// 가운데 타일과 둘레 [maxRing]칸만 봄 (z14 한 칸 ≈ 2.4 km), 없으면 null
+(double, Map<String, Object?>)? nearestArea(
+    PmTiles pm, double lat, double lon, String layer, bool Function(Map<String, Object?> props) match,
+    {int maxRing = 1}) {
+  final (cx, cy) = _tileXY(lat, lon);
+  (double, Map<String, Object?>)? best;
+  for (var dy = -maxRing; dy <= maxRing; dy++) {
+    for (var dx = -maxRing; dx <= maxRing; dx++) {
+      final bytes = pm.tile(_zoom, cx + dx, cy + dy);
+      if (bytes == null) continue;
+      for (final l in decodeMvt(bytes, {layer})) {
+        for (final f in l.features) {
+          if (f.type != 3 || !match(f.props)) continue;
+          final rings = [
+            for (final r in f.rings) [for (final p in r) _tileToLatLon(cx + dx, cy + dy, l.extent, p)]
+          ];
+          final d = areaDistanceM(rings, lat, lon);
+          if (best == null || d < best.$1) best = (d, f.props);
+        }
+      }
+    }
+  }
+  return best;
+}

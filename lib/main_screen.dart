@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart';
 import 'address.dart' show AddressSearcher, SearchHit;
 import 'advice.dart';
 import 'analysis.dart';
+import 'fire.dart';
 import 'main.dart';
 import 'nav.dart';
 import 'offline_map.dart';
@@ -326,6 +327,28 @@ class _MainScreenState extends State<MainScreen> {
                 Navigator.pop(ctx);
                 _showWater();
               },
+            ),
+          ),
+          // 불 사용 (참고): 숲 100 m·국립공원 기준
+          ValueListenableBuilder<FireStatus?>(
+            valueListenable: a.fire,
+            builder: (_, f, __) => ListTile(
+              leading: Icon(f?.banned == true ? Icons.local_fire_department : Icons.local_fire_department_outlined,
+                  color: f == null ? null : (f.banned ? Colors.redAccent : Colors.lightGreenAccent)),
+              title: Text(f == null ? '불 사용' : '불 사용 · ${f.banned ? '금지 구역' : '가능 (참고)'}'),
+              subtitle: Text(f == null ? '대한민국 지도를 받고 위치를 잡으면 숲까지 거리로 알려 줍니다' : f.summary),
+              trailing: const Icon(Icons.info_outline),
+              onTap: () => showDialog<void>(
+                context: context,
+                builder: (c) => AlertDialog(
+                  title: const Text('불 사용 (참고)'),
+                  content: Text('${f?.summary ?? '아직 계산 전입니다'}\n\n'
+                      '• 산림보호법: 숲과 숲에서 100 m 안(산림인접지역)에서는 불을 피우면 안 됩니다 (과태료).\n'
+                      '• 자연공원법: 국립공원 안에서는 지정된 곳 밖에서 불을 쓰면 안 됩니다.\n\n'
+                      '${FireStatus.caution}'),
+                  actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('닫기'))],
+                ),
+              ),
             ),
           ),
           ListTile(
@@ -1119,10 +1142,12 @@ class _NearbyChipState extends State<_NearbyChip> {
   Widget build(BuildContext context) => StreamBuilder<int>(
         stream: _tick,
         builder: (_, __) => AnimatedBuilder(
-          animation: Listenable.merge([widget.shelters, widget.analysis.water, widget.analysis.sunToday]),
+          animation: Listenable.merge(
+              [widget.shelters, widget.analysis.water, widget.analysis.sunToday, widget.analysis.fire]),
           builder: (_, __) {
             final near = widget.shelters.value, ws = widget.analysis.water.value;
             final sun = widget.analysis.sunChip(DateTime.now());
+            final fire = widget.analysis.fire.value;
             final parts = <(IconData, Color, String)>[
               if (near.isNotEmpty) (Icons.shield_outlined, const Color(0xFFB197FC), distanceLabel(near.first.$2)),
               if (ws.isNotEmpty)
@@ -1130,6 +1155,12 @@ class _NearbyChipState extends State<_NearbyChip> {
                   ws.any((w) => w.emergency) ? Icons.warning_amber_rounded : Icons.water_drop_outlined,
                   const Color(0xFF74C0FC),
                   distanceLabel(ws.first.distanceM)
+                ),
+              if (fire != null)
+                (
+                  Icons.local_fire_department_outlined,
+                  fire.banned ? Colors.redAccent : Colors.lightGreenAccent,
+                  fire.chip
                 ),
               if (sun != null)
                 (
