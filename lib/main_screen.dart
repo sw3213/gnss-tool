@@ -201,13 +201,10 @@ class _MainScreenState extends State<MainScreen> {
     final graph = pathOf(mode.isCar ? 'drive' : 'routes');
     if (graph == null) {
       messenger.showSnackBar(SnackBar(
-        content: Text(mode.isCar
-            ? '자동차 길찾기에는 "대한민국 자동차 길찾기" 자료가 필요합니다'
-            : '길찾기에는 "대한민국 길찾기" 자료가 필요합니다'),
+        content: Text(mode.isCar ? '자동차 길찾기에는 "대한민국 자동차 길찾기" 자료가 필요합니다' : '길찾기에는 "대한민국 길찾기" 자료가 필요합니다'),
         action: SnackBarAction(
           label: '받기',
-          onPressed: () =>
-              Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage())),
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage())),
         ),
       ));
       return;
@@ -263,32 +260,48 @@ class _MainScreenState extends State<MainScreen> {
   final _inPip = ValueNotifier<bool>(false);
 
   /// 경로가 있을 때만 홈으로 나가면 작은 창이 되게
-  void _syncPip() => _pip.invokeMethod<bool>('setAuto', widget.route.route.value != null).catchError((Object _) => false);
+  void _syncPip() =>
+      _pip.invokeMethod<bool>('setAuto', widget.route.route.value != null).catchError((Object _) => false);
 
-  // ---- 민방위 대피소 (오프라인에서 받은 kr-shelters.json) ----
-  ShelterIndex? _shelters;
-  String? _shelterFile;
+  // ---- 대피·안전 시설 (오프라인에서 받은 kr-shelters.json, kr-fac-<종류>.json) ----
+  ShelterIndex? _shelters; // 민방위 대피소 (지도 칩의 🛡)
+  var _facilities = <String, ShelterIndex>{}; // 종류마다 (민방위 대피소 포함)
+  String? _shelterFiles; // 지금 읽어 둔 파일들 (바뀌었을 때만 다시 읽음)
   (double, double)? _shelterAt; // 가까운 대피소를 마지막으로 찾은 위치
   final _nearShelters = ValueNotifier<List<(Shelter, double)>>(const []);
 
-  /// 대피소 자료를 받았거나 업데이트했으면 읽어서 지도에 그림
+  /// 시설 자료를 받았거나 업데이트했으면 읽어서 지도에 그림
   Future<void> _loadShelters() async {
     final store = MapStore.instance;
-    final p = store.installed.value.where((p) => p.kind == 'shelters').firstOrNull;
-    final path = p == null ? null : store.fileOf(p.id);
-    if (path == _shelterFile) return;
-    _shelterFile = path;
-    if (path == null) {
+    final paths = [
+      for (final p in store.installed.value)
+        if (p.kind == 'shelters' || p.kind == 'facility')
+          if (store.fileOf(p.id) case final f?) f
+    ]..sort();
+    final key = paths.join('|');
+    if (key == _shelterFiles) return;
+    _shelterFiles = key;
+    if (paths.isEmpty) {
       _shelters = null;
+      _facilities = {};
       _nearShelters.value = const [];
       widget.map.setShelters(const []);
       return;
     }
     try {
-      final list = await Isolate.run(() => parseShelters(File(path).readAsStringSync()));
-      if (!mounted || path != _shelterFile) return;
-      _shelters = ShelterIndex(list);
-      widget.map.setShelters([for (final s in list) (lat: s.lat, lon: s.lon, name: s.name)]);
+      final list = await Isolate.run(() => [
+            for (final path in paths)
+              if (File(path).existsSync()) ...parseShelters(File(path).readAsStringSync())
+          ]);
+      if (!mounted || key != _shelterFiles) return;
+      final byCat = <String, List<Shelter>>{};
+      for (final s in list) {
+        byCat.putIfAbsent(s.cat, () => []).add(s);
+      }
+      _facilities = {for (final e in byCat.entries) e.key: ShelterIndex(e.value)};
+      _shelters = _facilities['shelter'];
+      _nearShelters.value = const [];
+      widget.map.setShelters([for (final s in list) (lat: s.lat, lon: s.lon, name: s.name, cat: s.cat)]);
       _shelterAt = null;
       _updateShelters();
     } catch (_) {}
@@ -318,12 +331,16 @@ class _MainScreenState extends State<MainScreen> {
               leading: const Icon(Icons.shield_outlined, color: Color(0xFF7048E8)),
               title: const Text('민방위 대피소'),
               subtitle: Text(near.isEmpty
-                  ? (_shelters == null ? '오프라인에서 "민방위 대피소" 자료를 받으면 보입니다' : '5 km 안에 없음')
+                  ? (_facilities.isEmpty
+                      ? '오프라인에서 "민방위 대피소" 자료를 받으면 보입니다'
+                      : _shelters == null
+                          ? '받은 시설: ${_facilities.keys.map(facilityLabel).join(', ')}'
+                          : '5 km 안에 없음')
                   : '${near.first.$1.name} · ${shelterChipLabel(near).replaceFirst('대피소 ', '')}'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () {
                 Navigator.pop(ctx);
-                if (_shelters == null) {
+                if (_facilities.isEmpty) {
                   Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage()));
                 } else {
                   _showShelters();
@@ -392,51 +409,89 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  /// 가까운 대피소 목록: 누르면 그 대피소 카드 (길 안내), 깃발은 바로 직선 안내
+  /// 가까운 대피·안전 시설 목록: 위쪽에서 종류를 고르고, 누르면 그 시설 카드 (길 안내), 깃발은 바로 직선 안내
   void _showShelters() {
+    final cats = [
+      for (final c in facilityCats)
+        if (_facilities.containsKey(c.id)) c
+    ];
+    if (cats.isEmpty) return;
+    var cat = cats.first.id;
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       builder: (ctx) => SafeArea(
-        child: SingleChildScrollView(
-          child: ValueListenableBuilder<List<(Shelter, double)>>(
-            valueListenable: _nearShelters,
-            builder: (_, near, __) {
-              final s = widget.snap.value;
-              return Column(mainAxisSize: MainAxisSize.min, children: [
-                const ListTile(
-                  title: Text('가까운 민방위 대피소', style: TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text('행정안전부 자료 (매달 갱신). 공습·재난 때 가장 가까운 곳으로, 지하 시설이 더 안전합니다'),
-                ),
-                if (near.isEmpty) const ListTile(title: Text('5 km 안에 대피소가 없습니다')),
-                for (final (sh, d) in near)
+        child: StatefulBuilder(
+          builder: (ctx, setSheet) => SingleChildScrollView(
+            child: ValueListenableBuilder<List<(Shelter, double)>>(
+              valueListenable: _nearShelters, // 움직이면 다시 그림
+              builder: (_, __, ___) {
+                final s = widget.snap.value;
+                final c = cats.firstWhere((c) => c.id == cat);
+                final near = s.lat == null || s.lon == null
+                    ? const <(Shelter, double)>[]
+                    : _facilities[cat]!.nearest(s.lat!, s.lon!, n: 8);
+                final color = Color(c.color);
+                return Column(mainAxisSize: MainAxisSize.min, children: [
                   ListTile(
-                    leading: Icon(sh.underground ? Icons.shield : Icons.shield_outlined, color: const Color(0xFF7048E8)),
-                    title: Text(sh.name),
-                    subtitle: Text([
-                      s.lat == null
-                          ? distanceLabel(d)
-                          : '${distanceLabel(d)}  ·  ${directionLabel(bearingDeg(s.lat!, s.lon!, sh.lat, sh.lon))}',
-                      sh.summary,
-                      if (sh.address.isNotEmpty) sh.address,
-                    ].join('\n')),
-                    isThreeLine: true,
-                    trailing: IconButton(
-                      icon: const Icon(Icons.flag_outlined),
-                      tooltip: '여기로 안내',
-                      onPressed: () {
+                    title: Text('가까운 ${c.label}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text(cat == 'shelter'
+                        ? '행정안전부 자료 (매달 갱신). 공습·재난 때 가장 가까운 곳으로, 지하 시설이 더 안전합니다'
+                        : '공공데이터 자료 (매달 갱신). 운영 시간·이용 가능 여부는 전화로 확인하세요'),
+                  ),
+                  // 종류 고르기 (받은 것만)
+                  if (cats.length > 1)
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: Row(children: [
+                        for (final k in cats)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: ChoiceChip(
+                              avatar: Icon(facilityIcon(k.id), size: 18, color: Color(k.color)),
+                              label: Text(k.label),
+                              selected: k.id == cat,
+                              onSelected: (_) => setSheet(() => cat = k.id),
+                            ),
+                          ),
+                      ]),
+                    ),
+                  if (s.lat == null) const ListTile(title: Text('위치를 잡으면 가까운 곳을 보여 줍니다')),
+                  if (s.lat != null && near.isEmpty) ListTile(title: Text('5 km 안에 ${c.label}이(가) 없습니다')),
+                  for (final (sh, d) in near)
+                    ListTile(
+                      leading: Icon(
+                          cat == 'shelter'
+                              ? (sh.underground ? Icons.shield : Icons.shield_outlined)
+                              : facilityIcon(cat),
+                          color: color),
+                      title: Text(sh.name),
+                      subtitle: Text([
+                        '${distanceLabel(d)}  ·  ${directionLabel(bearingDeg(s.lat!, s.lon!, sh.lat, sh.lon))}',
+                        if (sh.summary.isNotEmpty) sh.summary,
+                        if (sh.info.isNotEmpty) sh.info,
+                        if (sh.address.isNotEmpty) sh.address,
+                      ].join('\n')),
+                      isThreeLine: true,
+                      trailing: IconButton(
+                        icon: const Icon(Icons.flag_outlined),
+                        tooltip: '여기로 안내',
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _guideTo(NavTarget(sh.name, sh.lat, sh.lon));
+                        },
+                      ),
+                      onTap: () {
                         Navigator.pop(ctx);
-                        _guideTo(NavTarget(sh.name, sh.lat, sh.lon));
+                        widget.map.showPlace(sh.lat, sh.lon);
+                        _onLongPress(sh.lat, sh.lon,
+                            name: sh.name, kind: [c.label, if (sh.summary.isNotEmpty) sh.summary].join(' · '));
                       },
                     ),
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      widget.map.showPlace(sh.lat, sh.lon);
-                      _onLongPress(sh.lat, sh.lon, name: sh.name, kind: '민방위 대피소 · ${sh.summary}');
-                    },
-                  ),
-              ]);
-            },
+                ]);
+              },
+            ),
           ),
         ),
       ),
@@ -534,14 +589,13 @@ class _MainScreenState extends State<MainScreen> {
   Future<void> _search() async {
     final s = widget.snap.value;
     final ok = s.fixQ > 0;
-    final h = await Navigator.of(context).push<SearchHit>(
-        MaterialPageRoute(
-            builder: (_) => SearchPage(
-                  lat: ok ? s.lat : null,
-                  lon: ok ? s.lon : null,
-                  mapLat: widget.map.camera.value?.target.latitude,
-                  mapLon: widget.map.camera.value?.target.longitude,
-                )));
+    final h = await Navigator.of(context).push<SearchHit>(MaterialPageRoute(
+        builder: (_) => SearchPage(
+              lat: ok ? s.lat : null,
+              lon: ok ? s.lon : null,
+              mapLat: widget.map.camera.value?.target.latitude,
+              mapLon: widget.map.camera.value?.target.longitude,
+            )));
     if (h == null || !mounted) return;
     widget.map.showPlace(h.lat, h.lon);
     _onLongPress(h.lat, h.lon, name: h.title);
@@ -705,8 +759,7 @@ class _MainScreenState extends State<MainScreen> {
         content: const Text('지형 분석에는 "대한민국 고도 데이터 (분석용)"이 필요합니다'),
         action: SnackBarAction(
           label: '받기',
-          onPressed: () =>
-              Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage())),
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage())),
         ),
       ));
 
@@ -739,8 +792,7 @@ class _MainScreenState extends State<MainScreen> {
                     activeThumbColor: Colors.orange,
                     onChanged: a.setEmergencyWater,
                   ),
-                  if (ws.isEmpty)
-                    const ListTile(title: Text('주변 10 km 안에 찾은 수원지가 없습니다')),
+                  if (ws.isEmpty) const ListTile(title: Text('주변 10 km 안에 찾은 수원지가 없습니다')),
                   for (var i = 0; i < ws.length; i++)
                     ListTile(
                       leading: CircleAvatar(
@@ -763,7 +815,8 @@ class _MainScreenState extends State<MainScreen> {
                         tooltip: '여기로 안내',
                         onPressed: () {
                           Navigator.pop(ctx);
-                          _guideTo(NavTarget('${ws[i].emergency ? '긴급 ' : ''}${ws[i].name ?? ws[i].label}', ws[i].lat, ws[i].lon));
+                          _guideTo(NavTarget(
+                              '${ws[i].emergency ? '긴급 ' : ''}${ws[i].name ?? ws[i].label}', ws[i].lat, ws[i].lon));
                         },
                       ),
                       onTap: () {
@@ -804,7 +857,9 @@ class _MainScreenState extends State<MainScreen> {
                     ),
                 ]),
               ),
-              for (final g in MapControl.layerGroups.where((g) => g.cat == cat))
+              for (final g in MapControl.layerGroups.where((g) =>
+                  g.cat == cat &&
+                  (!g.id.startsWith('fac-') || widget.map.facilityCatsLoaded.value.contains(g.id.substring(4)))))
                 CheckboxListTile(
                   secondary: Icon(g.icon),
                   title: Text(g.label),
@@ -851,8 +906,7 @@ class _MainScreenState extends State<MainScreen> {
       final img = await widget.analysis.fireMapImage(c.latitude, c.longitude);
       if (img == null) {
         if (mounted) {
-          ScaffoldMessenger.of(context)
-              .showSnackBar(const SnackBar(content: Text('불 사용 지역은 "대한민국" 지도를 받아야 볼 수 있습니다')));
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('불 사용 지역은 "대한민국" 지도를 받아야 볼 수 있습니다')));
         }
         return false;
       }
@@ -909,9 +963,8 @@ class _MainScreenState extends State<MainScreen> {
     final dist = t.distance.value;
     final path = await t.stop();
     messenger.showSnackBar(SnackBar(
-      content: Text(path == null
-          ? '기록할 이동이 없어 저장하지 않았습니다'
-          : '이동 기록 저장: ${distanceLabel(dist)} (${path.split('/').last})'),
+      content:
+          Text(path == null ? '기록할 이동이 없어 저장하지 않았습니다' : '이동 기록 저장: ${distanceLabel(dist)} (${path.split('/').last})'),
     ));
   }
 
@@ -941,7 +994,8 @@ class _MainScreenState extends State<MainScreen> {
       ),
     );
     if (name == null || name.trim().isEmpty) return;
-    await widget.waypoints.add(Waypoint(name.trim(), at?.$1 ?? s.lat!, at?.$2 ?? s.lon!, at == null ? s.alt : at.$3, DateTime.now()));
+    await widget.waypoints
+        .add(Waypoint(name.trim(), at?.$1 ?? s.lat!, at?.$2 ?? s.lon!, at == null ? s.alt : at.$3, DateTime.now()));
     messenger.showSnackBar(SnackBar(content: Text('"${name.trim()}" 저장했습니다')));
   }
 
@@ -1001,31 +1055,31 @@ class _MainScreenState extends State<MainScreen> {
               Padding(
                 padding: const EdgeInsets.only(top: 8, right: 10),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              _GpsStatusChip(snap: widget.snap, sourceLabel: widget.sourceLabel),
-              const SizedBox(height: 10),
-              // 메뉴를 펼치면 방위·전방 경사 글씨는 숨김 (메뉴 이름표와 겹치지 않게)
-              ValueListenableBuilder<bool>(
-                valueListenable: _menuOpen,
-                builder: (_, open, __) => Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                  _CompassButton(map: widget.map, heading: widget.heading, showLabel: !open),
-                  const SizedBox(height: 6),
-                  // "전방 내리막 -5m · -4%" (바라보는 방향 100 m 앞)
-                  ValueListenableBuilder<String?>(
-                    valueListenable: widget.analysis.slope,
-                    builder: (_, s, __) => s == null || open
-                        ? const SizedBox.shrink()
-                    : _MapChip(
-                        icon: s.contains('오르막')
-                            ? Icons.north_east
-                            : s.contains('내리막')
-                                ? Icons.south_east
-                                : Icons.east,
-                        text: s,
+                  _GpsStatusChip(snap: widget.snap, sourceLabel: widget.sourceLabel),
+                  const SizedBox(height: 10),
+                  // 메뉴를 펼치면 방위·전방 경사 글씨는 숨김 (메뉴 이름표와 겹치지 않게)
+                  ValueListenableBuilder<bool>(
+                    valueListenable: _menuOpen,
+                    builder: (_, open, __) => Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                      _CompassButton(map: widget.map, heading: widget.heading, showLabel: !open),
+                      const SizedBox(height: 6),
+                      // "전방 내리막 -5m · -4%" (바라보는 방향 100 m 앞)
+                      ValueListenableBuilder<String?>(
+                        valueListenable: widget.analysis.slope,
+                        builder: (_, s, __) => s == null || open
+                            ? const SizedBox.shrink()
+                            : _MapChip(
+                                icon: s.contains('오르막')
+                                    ? Icons.north_east
+                                    : s.contains('내리막')
+                                        ? Icons.south_east
+                                        : Icons.east,
+                                text: s,
+                              ),
                       ),
+                    ]),
                   ),
                 ]),
-              ),
-            ]),
               ),
             ]),
           ),
@@ -1117,8 +1171,7 @@ class _MainScreenState extends State<MainScreen> {
       bottomNavigationBar: _BottomBar(
         onSearch: _search,
         onWaypoint: _saveWaypoint,
-        onOffline: () => Navigator.of(context)
-            .push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage())),
+        onOffline: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage())),
         onTools: _openTools,
       ),
     );
@@ -1384,16 +1437,16 @@ class _InfoPanel extends StatelessWidget {
               builder: (_, s, __) => InkWell(
                 onTap: s.lat == null || s.lon == null ? null : () => copyCoordinates(context, s.lat!, s.lon!),
                 child: _PanelItem(
-                icon: Icons.navigation,
-                iconColor: const Color(0xFF4D7CFE),
-                title: 'GPS 현재 위치',
-                value: s.hAcc != null
-                    ? '오차범위 ±${s.hAcc!.toStringAsFixed(1)} m'
-                    : s.lat != null
-                        ? '측위 중'
-                        : '측위 대기',
-                valueColor: s.hAcc == null ? null : accuracyColor(s.hAcc),
-              ),
+                  icon: Icons.navigation,
+                  iconColor: const Color(0xFF4D7CFE),
+                  title: 'GPS 현재 위치',
+                  value: s.hAcc != null
+                      ? '오차범위 ±${s.hAcc!.toStringAsFixed(1)} m'
+                      : s.lat != null
+                          ? '측위 중'
+                          : '측위 대기',
+                  valueColor: s.hAcc == null ? null : accuracyColor(s.hAcc),
+                ),
               ),
             ),
           ),
@@ -1607,15 +1660,13 @@ class ToolsPage extends StatelessWidget {
           () => open(SensorPage(data: sensors, weather: weather, qnhHistory: qnhHistory), '센서 그래프')),
       tile(Icons.place_outlined, '저장한 지점', '거리·방위 보기, 지도에서 찾기',
           () => open(WaypointsPage(waypoints: waypoints, snap: snap, map: map, onGuide: onGuide), '저장한 지점')),
-      tile(Icons.route, '경로 따라가기', 'GPX 불러오기, 내 이동 기록, 왔던 길로 돌아가기',
-          () => open(RoutesPage(route: route), '경로 따라가기')),
+      tile(Icons.route, '경로 따라가기', 'GPX 불러오기, 내 이동 기록, 왔던 길로 돌아가기', () => open(RoutesPage(route: route), '경로 따라가기')),
       tile(Icons.terminal, 'NMEA 로그', '수신기 원시 문장', () => open(LogPage(log: log), 'NMEA 로그')),
       const Divider(),
       tile(Icons.settings, '설정', '위치 출처 (폰 GPS / 외부 장치)',
           () => open(SettingsPage(source: source, onSource: onSource), '설정')),
       if (updateSupported)
-        tile(Icons.system_update, '앱 업데이트 확인', '새 버전이 있으면 설치',
-            () => checkForUpdate(context, manual: true)),
+        tile(Icons.system_update, '앱 업데이트 확인', '새 버전이 있으면 설치', () => checkForUpdate(context, manual: true)),
     ]);
   }
 }
@@ -1998,7 +2049,8 @@ class _RouteCard extends StatelessWidget {
                                       else
                                         '진행 방향 ${directionLabel(i.ahead)}',
                                       route.timeLabel(i),
-                                      if (i.climbLeft >= 10 && route.carSpeed == null) '남은 오르막 ${i.climbLeft.round()} m',
+                                      if (i.climbLeft >= 10 && route.carSpeed == null)
+                                        '남은 오르막 ${i.climbLeft.round()} m',
                                     ].join('  ·  '),
                               style: sub,
                             ),
@@ -2158,9 +2210,7 @@ class _TurnBannerState extends State<_TurnBanner> {
                     distanceLabel(d),
                     null,
                     name: _nameAfter(r, t),
-                    then: after == null
-                        ? null
-                        : (turnIcon(after.angle), '그다음 ${distanceLabel(after.at - t.at)}'),
+                    then: after == null ? null : (turnIcon(after.angle), '그다음 ${distanceLabel(after.at - t.at)}'),
                   );
                 },
               ),

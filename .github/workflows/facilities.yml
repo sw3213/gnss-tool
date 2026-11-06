@@ -1,0 +1,57 @@
+name: Build safety facilities
+
+# 대피·안전 시설(미세먼지쉼터 …)을 종류마다 kr-fac-<종류>.json으로 만들어 Release "maps"에 올림.
+# 인증키는 GitHub Secret (공공데이터포털 DATA_GO_KR_KEY). 앱은 kind="facility"로 지도·가까운 시설에 씀.
+# 만드는 코드는 maps/build_facilities.py, 앱 쪽은 lib/shelters.dart.
+# 종류를 늘리면 아래 CATS에 더함 (카탈로그를 한 번에 고치려고 한 job에서 차례로)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['maps/build_facilities.py', '.github/workflows/facilities.yml']
+  schedule:
+    - cron: '0 9 1 * *' # 매월 1일
+
+permissions:
+  contents: write
+
+env:
+  CATS: dust
+
+jobs:
+  facilities:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download facilities
+        env:
+          DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
+        run: |
+          for c in $CATS; do
+            python3 maps/build_facilities.py "$c" "kr-fac-$c.json"
+          done
+
+      - name: Publish to release "maps"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          date=$(date -u +%Y-%m-%d)
+          gh release download maps -p catalog.json -O catalog.json 2>/dev/null || echo '[]' > catalog.json
+          for c in $CATS; do
+            f="kr-fac-$c.json"
+            label=$(python3 maps/build_facilities.py --label "$c")
+            jq --arg id "kr-fac-$c" --arg name "대한민국 $label" \
+               --arg url "https://github.com/$REPO/releases/download/maps/$f" \
+               --arg date "$date" --argjson size "$(stat -c %s "$f")" \
+               '[.[] | select(.id != $id)] + [{
+                  id: $id, name: $name, kind: "facility",
+                  bbox: [124.5, 33.0, 132.0, 38.7], url: $url, date: $date, size: $size, maxzoom: 0
+                }]' catalog.json > new.json
+            mv new.json catalog.json
+          done
+          cat catalog.json
+          gh release upload maps kr-fac-*.json catalog.json --clobber

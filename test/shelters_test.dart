@@ -26,4 +26,14 @@ void main() {
     expect(idx.nearest(35.0, 129.0), isEmpty);
     expect(shelterChipLabel(const []), '');
   });
+
+  test('facility files carry their kind and an info line', () {
+    final s = parseShelters('{"date":"2026-11-06","cat":"dust","items":['
+        '["대잠3 경로당","마을회관",0,48,"경북 포항시 남구 새천년대로422번길 7-7",36.013563,129.345144,"평일 09:00~18:00 · 054-275-6259"]]}');
+    expect(s.single.cat, 'dust');
+    expect(s.single.info, '평일 09:00~18:00 · 054-275-6259');
+    expect(s.single.summary, '마을회관 · 48명'); // 지하/지상은 민방위 대피소만
+    expect(facilityLabel('dust'), '미세먼지쉼터');
+    expect(parseShelters('{"items":[["a","b",1,0,"",36.0,127.0]]}').single.cat, 'shelter');
+  });
 }

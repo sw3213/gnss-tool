@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'main.dart' show GnssSnapshot;
 import 'nav.dart';
+import 'shelters.dart';
 
 // ============================================================
 // 오프라인 지도: 나라별 .pmtiles 다운로드/관리 + MapLibre 화면
@@ -88,6 +89,7 @@ class MapStore {
     if (!crashed) f.deleteSync();
     return crashed;
   }
+
   Future<void> markMapOpen(bool open) async {
     final f = await _openFlag();
     if (open) {
@@ -235,7 +237,6 @@ class DlState {
   const DlState(this.fraction, this.text);
 }
 
-
 // ---------------- 지도 스타일 ----------------
 // 바탕은 Protomaps 공식 밝은 테마(assets/map/style-light.json, maps/gen-style.mjs로 생성, 한국어 라벨):
 // 건물·번지·아이콘(버스 정류장, 식수대, 봉우리…)·도로 번호판 포함. 여기에 등산로 강조와 건물 이름을 더함.
@@ -253,7 +254,8 @@ Future<String> buildStyle(List<MapPack> packs) async {
 
   const empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
   final sources = <String, dynamic>{
-    for (final id in ['me', 'track', 'wpts', 'water', 'target', 'route', 'pick', 'shelters']) id: {'type': 'geojson', 'data': empty},
+    for (final id in ['me', 'track', 'wpts', 'water', 'target', 'route', 'pick', 'shelters'])
+      id: {'type': 'geojson', 'data': empty},
   };
   final layers = <Map<String, dynamic>>[
     for (final l in base)
@@ -261,7 +263,10 @@ Future<String> buildStyle(List<MapPack> packs) async {
   ];
 
   // 지형(등고선·고도 색칠) 레이어: 기본 지도 사이사이에 끼워 넣음
-  final terrain = [for (final p in packs) if (p.isTerrain) p];
+  final terrain = [
+    for (final p in packs)
+      if (p.isTerrain) p
+  ];
   for (final p in terrain) {
     sources['t_${p.id}'] = {
       'type': 'vector',
@@ -274,7 +279,10 @@ Future<String> buildStyle(List<MapPack> packs) async {
   final contourLabels = [for (final p in terrain) ..._contourLabelLayers('t_${p.id}')];
 
   // 건물 이름(아파트 동 번호): 기본 지도에 빠져 있어 labels.yml이 따로 만든 지도
-  final names = [for (final p in packs) if (p.kind == 'labels') p];
+  final names = [
+    for (final p in packs)
+      if (p.kind == 'labels') p
+  ];
   for (final p in names) {
     sources['l_${p.id}'] = {
       'type': 'vector',
@@ -288,7 +296,10 @@ Future<String> buildStyle(List<MapPack> packs) async {
   ];
 
   // 지형 음영(산 그림자): hillshade.yml이 만든 고도 타일. 고도 색칠 위, 등고선과 같은 높이에 그림
-  final shades = [for (final p in packs) if (p.kind == 'hillshade') p];
+  final shades = [
+    for (final p in packs)
+      if (p.kind == 'hillshade') p
+  ];
   for (final p in shades) {
     sources['h_${p.id}'] = {
       'type': 'raster-dem',
@@ -325,6 +336,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
   }
   if (!placed) layers.addAll([...bands, ...contours, ...contourLabels, ...nameLayers]); // 기본 지도 없이 받은 경우
   layers.addAll([for (final p in names) ..._complexNameLayers('l_${p.id}')]);
+  layers.addAll(_facilityLayers());
   layers.addAll(_meLayers);
 
   return jsonEncode({
@@ -354,14 +366,30 @@ List<Map<String, dynamic>> _bandLayers(String s) => [
         'source-layer': 'bands',
         'paint': {
           'fill-color': _bandColor,
-          'fill-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0.75, 14, 0.55],
+          'fill-opacity': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            6,
+            0.75,
+            14,
+            0.55
+          ],
           'fill-antialias': false, // 구역 경계에 실선이 보이지 않게
         },
       },
     ];
 
 // 100 m마다 굵고 진한 주곡선, 20 m 간격은 가는 선
-const _isIndex = ['==', ['%', ['get', 'ele'], 100], 0];
+const _isIndex = [
+  '==',
+  [
+    '%',
+    ['get', 'ele'],
+    100
+  ],
+  0
+];
 
 List<Map<String, dynamic>> _contourLayers(String s) => [
       {
@@ -369,7 +397,11 @@ List<Map<String, dynamic>> _contourLayers(String s) => [
         'type': 'line',
         'source': s,
         'source-layer': 'contour',
-        'filter': ['>', ['get', 'ele'], 0],
+        'filter': [
+          '>',
+          ['get', 'ele'],
+          0
+        ],
         'paint': {
           'line-color': ['case', _isIndex, '#8a5a2e', '#a8794c'],
           'line-opacity': ['case', _isIndex, 0.75, 0.45],
@@ -390,10 +422,21 @@ List<Map<String, dynamic>> _contourLabelLayers(String s) => [
         'source': s,
         'source-layer': 'contour',
         'minzoom': 13,
-        'filter': ['all', ['>', ['get', 'ele'], 0], _isIndex],
+        'filter': [
+          'all',
+          [
+            '>',
+            ['get', 'ele'],
+            0
+          ],
+          _isIndex
+        ],
         'layout': {
           'symbol-placement': 'line',
-          'text-field': ['to-string', ['get', 'ele']],
+          'text-field': [
+            'to-string',
+            ['get', 'ele']
+          ],
           'text-font': ['NotoSansRegular'],
           'text-size': 10,
           'symbol-spacing': 350,
@@ -409,7 +452,17 @@ List<Map<String, dynamic>> _hillshadeLayers(String s) => [
         'type': 'hillshade',
         'source': s,
         'paint': {
-          'hillshade-exaggeration': ['interpolate', ['linear'], ['zoom'], 6, 0.45, 12, 0.6, 16, 0.4],
+          'hillshade-exaggeration': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            6,
+            0.45,
+            12,
+            0.6,
+            16,
+            0.4
+          ],
           'hillshade-shadow-color': '#3b3020',
           'hillshade-highlight-color': '#fffdf5',
           'hillshade-accent-color': '#5a4a32',
@@ -424,19 +477,35 @@ Map<String, dynamic> _buildings3d(String s) => {
       'source': s,
       'source-layer': 'buildings',
       'minzoom': 14,
-      'filter': ['==', ['get', 'kind'], 'building'],
+      'filter': [
+        '==',
+        ['get', 'kind'],
+        'building'
+      ],
       'layout': {'visibility': 'none'},
       'paint': {
         'fill-extrusion-color': '#d8d0c8',
-        'fill-extrusion-height': ['coalesce', ['get', 'height'], 6],
-        'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
+        'fill-extrusion-height': [
+          'coalesce',
+          ['get', 'height'],
+          6
+        ],
+        'fill-extrusion-base': [
+          'coalesce',
+          ['get', 'min_height'],
+          0
+        ],
         'fill-extrusion-opacity': 0.85,
       },
     };
 
 // ---------------- 건물 이름 (labels.yml이 만든 bldg 레이어: name, short, dong) ----------------
 
-const _isDong = ['==', ['get', 'dong'], 1];
+const _isDong = [
+  '==',
+  ['get', 'dong'],
+  1
+];
 
 /// 아파트 단지 이름("구곡현대2차아파트"): 단지 부지 가운데에 넓은 자간의 회색 글씨.
 /// 다른 라벨(동 번호·번지·가게)보다 먼저 자리를 잡도록 모든 지도 레이어 뒤(위)에 둠 — MapLibre는 위 레이어부터 배치.
@@ -448,11 +517,23 @@ List<Map<String, dynamic>> _complexNameLayers(String s) => [
         'source': s,
         'source-layer': 'bldg',
         'minzoom': 14,
-        'filter': ['==', ['get', 'kind'], 'complex'],
+        'filter': [
+          '==',
+          ['get', 'kind'],
+          'complex'
+        ],
         'layout': {
           'text-field': ['get', 'name'],
           'text-font': ['NotoSansMedium'],
-          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 10, 17, 14],
+          'text-size': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            14,
+            10,
+            17,
+            14
+          ],
           'text-letter-spacing': 0.15,
           'text-max-width': 12,
           'text-padding': 1,
@@ -471,9 +552,19 @@ List<Map<String, dynamic>> _buildingNameLayers(String s) => [
         'source': s,
         'source-layer': 'bldg',
         'minzoom': 15,
-        'filter': ['==', ['get', 'kind'], 'bldg'],
+        'filter': [
+          '==',
+          ['get', 'kind'],
+          'bldg'
+        ],
         'layout': {
-          'text-field': ['step', ['zoom'], ['get', 'short'], 17, ['get', 'name']],
+          'text-field': [
+            'step',
+            ['zoom'],
+            ['get', 'short'],
+            17,
+            ['get', 'name']
+          ],
           'text-font': ['NotoSansMedium'],
           'text-size': [
             'interpolate', ['linear'], ['zoom'], //
@@ -500,9 +591,21 @@ List<Map<String, dynamic>> _exitLayers(String s) => [
         'source': s,
         'source-layer': 'bldg',
         'minzoom': 15,
-        'filter': ['==', ['get', 'kind'], 'exit'],
+        'filter': [
+          '==',
+          ['get', 'kind'],
+          'exit'
+        ],
         'paint': {
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], 15, 7, 18, 10],
+          'circle-radius': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            15,
+            7,
+            18,
+            10
+          ],
           'circle-color': '#2b8a3e',
           'circle-stroke-color': '#ffffff',
           'circle-stroke-width': 1.5,
@@ -514,11 +617,23 @@ List<Map<String, dynamic>> _exitLayers(String s) => [
         'source': s,
         'source-layer': 'bldg',
         'minzoom': 15,
-        'filter': ['==', ['get', 'kind'], 'exit'],
+        'filter': [
+          '==',
+          ['get', 'kind'],
+          'exit'
+        ],
         'layout': {
           'text-field': ['get', 'short'],
           'text-font': ['NotoSansMedium'],
-          'text-size': ['interpolate', ['linear'], ['zoom'], 15, 9, 18, 12],
+          'text-size': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            15,
+            9,
+            18,
+            12
+          ],
           'text-allow-overlap': true,
           'text-ignore-placement': true,
         },
@@ -538,11 +653,25 @@ Map<String, dynamic> _tweak(Map<String, dynamic> l, String id) {
         'filter': [
           'all',
           jsonDecode(f),
-          ['!=', ['get', 'kind'], 'peak'],
+          [
+            '!=',
+            ['get', 'kind'],
+            'peak'
+          ],
         ],
         'layout': {
           ...(l['layout'] as Map<String, dynamic>),
-          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 10, 17, 11, 19, 16],
+          'text-size': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            14,
+            10,
+            17,
+            11,
+            19,
+            16
+          ],
         },
       };
     case 'address_label':
@@ -570,11 +699,22 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
         'filter': [
           'in',
           ['get', 'kind_detail'],
-          ['literal', ['path', 'footway', 'track', 'bridleway', 'steps']],
+          [
+            'literal',
+            ['path', 'footway', 'track', 'bridleway', 'steps']
+          ],
         ],
         'paint': {
           'line-color': '#b5562f',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 12, 0.8, 17, 2.4],
+          'line-width': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            12,
+            0.8,
+            17,
+            2.4
+          ],
           'line-dasharray': [2, 1.2],
         },
       },
@@ -591,13 +731,38 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
           [
             'in',
             ['get', 'kind'],
-            ['literal', ['school', 'university', 'college', 'hospital', 'park', 'cemetery', 'military', 'industrial', 'commercial']],
+            [
+              'literal',
+              [
+                'school',
+                'university',
+                'college',
+                'hospital',
+                'park',
+                'cemetery',
+                'military',
+                'industrial',
+                'commercial'
+              ]
+            ],
           ],
         ],
         'layout': {
-          'text-field': ['coalesce', ['get', 'name:ko'], ['get', 'name']],
+          'text-field': [
+            'coalesce',
+            ['get', 'name:ko'],
+            ['get', 'name']
+          ],
           'text-font': ['NotoSansRegular'],
-          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 10, 17, 12],
+          'text-size': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            14,
+            10,
+            17,
+            12
+          ],
           'text-max-width': 8,
         },
         'paint': {'text-color': '#8a8076', 'text-halo-color': '#ffffff', 'text-halo-width': 1},
@@ -609,20 +774,51 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
         'source': s,
         'source-layer': 'pois',
         'minzoom': 10,
-        'filter': ['==', ['get', 'kind'], 'peak'],
+        'filter': [
+          '==',
+          ['get', 'kind'],
+          'peak'
+        ],
         'layout': {
           'icon-image': 'peak',
           'text-field': [
             'case',
-            ['any', ['has', 'elevation'], ['has', 'ele']],
+            [
+              'any',
+              ['has', 'elevation'],
+              ['has', 'ele']
+            ],
             [
               'concat',
-              ['coalesce', ['get', 'name:ko'], ['get', 'name'], ''],
+              [
+                'coalesce',
+                ['get', 'name:ko'],
+                ['get', 'name'],
+                ''
+              ],
               '\n',
-              ['to-string', ['round', ['to-number', ['coalesce', ['get', 'elevation'], ['get', 'ele']]]]],
+              [
+                'to-string',
+                [
+                  'round',
+                  [
+                    'to-number',
+                    [
+                      'coalesce',
+                      ['get', 'elevation'],
+                      ['get', 'ele']
+                    ]
+                  ]
+                ]
+              ],
               ' m',
             ],
-            ['coalesce', ['get', 'name:ko'], ['get', 'name'], ''],
+            [
+              'coalesce',
+              ['get', 'name:ko'],
+              ['get', 'name'],
+              ''
+            ],
           ],
           'text-font': ['NotoSansRegular'],
           'text-size': 11,
@@ -633,44 +829,91 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
       },
     ];
 
+/// 대피·안전 시설 점: 종류마다 색이 다른 점 (확대 14부터: 덜 확대하면 점이 너무 많아 지도가 어지러움), 16부터 이름.
+/// 누르면 카드 (이름·종류·주소). 민방위 대피소는 예전 이름(shelters-pt) 그대로
+List<Map<String, Object>> _facilityLayers() => [
+      for (final c in facilityCats) ...[
+        {
+          'id': facilityLayerId(c.id, 'pt'),
+          'type': 'circle',
+          'source': 'shelters',
+          'minzoom': 14,
+          'filter': [
+            '==',
+            ['get', 'cat'],
+            c.id
+          ],
+          'paint': {
+            'circle-radius': [
+              'interpolate',
+              ['linear'],
+              ['zoom'],
+              14,
+              4,
+              17,
+              7
+            ],
+            'circle-color': _hex(c.color),
+            'circle-stroke-color': '#ffffff',
+            'circle-stroke-width': 1.5,
+          },
+        },
+        {
+          'id': facilityLayerId(c.id, 'label'),
+          'type': 'symbol',
+          'source': 'shelters',
+          'minzoom': 16,
+          'filter': [
+            '==',
+            ['get', 'cat'],
+            c.id
+          ],
+          'layout': {
+            'text-field': ['get', 'name'],
+            'text-font': ['NotoSansMedium'],
+            'text-size': 11,
+            'text-anchor': 'top',
+            'text-offset': [0, 0.7],
+            'text-max-width': 9,
+          },
+          'paint': {'text-color': _hex(c.color), 'text-halo-color': '#ffffff', 'text-halo-width': 1.5},
+        },
+      ],
+    ];
+
+/// 시설 종류의 레이어 id: 민방위 대피소는 shelters-pt / shelters-label, 나머지는 fac-pt-<종류>
+String facilityLayerId(String cat, String part) => cat == 'shelter' ? 'shelters-$part' : 'fac-$part-$cat';
+
+String _hex(int argb) => '#${(argb & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
+
+/// 시설 종류별 아이콘
+IconData facilityIcon(String cat) => switch (cat) {
+      'shelter' => Icons.shield_outlined,
+      'quake' => Icons.vibration,
+      'tsunami' => Icons.waves,
+      'chemical' => Icons.science_outlined,
+      'housing' || 'quake_housing' => Icons.night_shelter_outlined,
+      'heat' => Icons.wb_sunny_outlined,
+      'cold' => Icons.ac_unit,
+      'dust' => Icons.masks_outlined,
+      'water' => Icons.water_drop_outlined,
+      _ => Icons.place_outlined,
+    };
+
 // 이동 기록 선, 가까운 수원지, 저장한 지점, 내 위치 (맨 위)
 const _meLayers = [
-  // 민방위 대피소: 보라 점 (확대 14부터: 덜 확대하면 점이 너무 많아 지도가 어지러움), 16부터 이름.
-  // 누르면 카드 (이름·종류·주소). 가까운 대피소는 왼쪽 아래 주변 정보에서 언제든
-  {
-    'id': 'shelters-pt',
-    'type': 'circle',
-    'source': 'shelters',
-    'minzoom': 14,
-    'paint': {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 4, 17, 7],
-      'circle-color': '#7048e8',
-      'circle-stroke-color': '#ffffff',
-      'circle-stroke-width': 1.5,
-    },
-  },
-  {
-    'id': 'shelters-label',
-    'type': 'symbol',
-    'source': 'shelters',
-    'minzoom': 16,
-    'layout': {
-      'text-field': ['get', 'name'],
-      'text-font': ['NotoSansMedium'],
-      'text-size': 11,
-      'text-anchor': 'top',
-      'text-offset': [0, 0.7],
-      'text-max-width': 9,
-    },
-    'paint': {'text-color': '#5f3dc4', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5},
-  },
   {
     'id': 'water-pt',
     'type': 'circle',
     'source': 'water',
     'paint': {
       'circle-radius': 9,
-      'circle-color': ['case', ['get', 'e'], '#e8590c', '#1c7ed6'], // 긴급 수원지는 주황
+      'circle-color': [
+        'case',
+        ['get', 'e'],
+        '#e8590c',
+        '#1c7ed6'
+      ], // 긴급 수원지는 주황
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 2,
     },
@@ -707,15 +950,28 @@ const _meLayers = [
     'id': 'target-line',
     'type': 'line',
     'source': 'target',
-    'filter': ['==', ['geometry-type'], 'LineString'],
+    'filter': [
+      '==',
+      ['geometry-type'],
+      'LineString'
+    ],
     'layout': {'line-cap': 'round'},
-    'paint': {'line-color': '#e03131', 'line-width': 3, 'line-dasharray': [1.5, 1.5], 'line-opacity': 0.85},
+    'paint': {
+      'line-color': '#e03131',
+      'line-width': 3,
+      'line-dasharray': [1.5, 1.5],
+      'line-opacity': 0.85
+    },
   },
   {
     'id': 'target-pt',
     'type': 'circle',
     'source': 'target',
-    'filter': ['==', ['geometry-type'], 'Point'],
+    'filter': [
+      '==',
+      ['geometry-type'],
+      'Point'
+    ],
     'paint': {
       'circle-radius': 8,
       'circle-color': '#e03131',
@@ -727,7 +983,11 @@ const _meLayers = [
     'id': 'target-label',
     'type': 'symbol',
     'source': 'target',
-    'filter': ['==', ['geometry-type'], 'Point'],
+    'filter': [
+      '==',
+      ['geometry-type'],
+      'Point'
+    ],
     'layout': {
       'text-field': ['get', 'name'],
       'text-font': ['NotoSansMedium'],
@@ -767,7 +1027,11 @@ const _meLayers = [
     'id': 'me-acc',
     'type': 'circle',
     'source': 'me',
-    'filter': ['==', ['geometry-type'], 'Point'],
+    'filter': [
+      '==',
+      ['geometry-type'],
+      'Point'
+    ],
     'paint': {'circle-radius': 18, 'circle-color': '#3b6cf6', 'circle-opacity': 0.15},
   },
   // 길게 누른 곳·검색한 곳 (메뉴가 열려 있는 동안): 빨간 점 + 흰 테두리
@@ -800,7 +1064,11 @@ const _meLayers = [
     'id': 'me',
     'type': 'circle',
     'source': 'me',
-    'filter': ['==', ['geometry-type'], 'Point'],
+    'filter': [
+      '==',
+      ['geometry-type'],
+      'Point'
+    ],
     'paint': {
       'circle-radius': 7,
       'circle-color': '#3b6cf6',
@@ -893,7 +1161,10 @@ class MapControl {
         if (t != null)
           {
             'type': 'Feature',
-            'geometry': {'type': 'Point', 'coordinates': [t.lon, t.lat]},
+            'geometry': {
+              'type': 'Point',
+              'coordinates': [t.lon, t.lat]
+            },
             'properties': {'name': t.name},
           },
       ],
@@ -940,7 +1211,7 @@ class MapControl {
   static const layerCategories = ['지도', '대피·안전', '물'];
 
   /// 스타일의 레이어 id 끝부분([suffixes])으로 묶음. [cat]은 [layerCategories] 중 하나
-  static const layerGroups = [
+  static final layerGroups = <({String id, String cat, String label, IconData icon, List<String> suffixes})>[
     (id: 'contour', cat: '지도', label: '등고선', icon: Icons.terrain_outlined, suffixes: ['-contour', '-contour-label']),
     (id: 'bands', cat: '지도', label: '고도 색칠', icon: Icons.gradient, suffixes: ['-bands']),
     (id: 'hillshade', cat: '지도', label: '산 그림자 (입체 음영)', icon: Icons.landscape_outlined, suffixes: ['-hillshade']),
@@ -948,15 +1219,22 @@ class MapControl {
     (id: 'pois', cat: '지도', label: '장소 아이콘', icon: Icons.place_outlined, suffixes: ['-pois']),
     (id: 'dong', cat: '지도', label: '건물·아파트 이름', icon: Icons.apartment, suffixes: ['-dong', '-complex']),
     (id: 'exit', cat: '지도', label: '지하철 출구 번호', icon: Icons.subway_outlined, suffixes: ['-exit', '-exit-no']),
-    (
-      id: 'shelters',
-      cat: '대피·안전',
-      label: '민방위 대피소',
-      icon: Icons.shield_outlined,
-      suffixes: ['shelters-pt', 'shelters-label']
-    ),
+    // 대피·안전 시설: 민방위 대피소는 id 'shelters'(예전에 끈 설정 그대로), 나머지는 'fac-<종류>'
+    for (final c in facilityCats)
+      (
+        id: facilityGroupId(c.id),
+        cat: '대피·안전',
+        label: c.label,
+        icon: facilityIcon(c.id),
+        suffixes: [facilityLayerId(c.id, 'pt'), facilityLayerId(c.id, 'label')]
+      ),
     (id: 'water', cat: '물', label: '수원지 번호', icon: Icons.water_drop_outlined, suffixes: ['water-pt', 'water-num']),
   ];
+
+  static String facilityGroupId(String cat) => cat == 'shelter' ? 'shelters' : 'fac-$cat';
+
+  /// 받아 둔 시설 종류 (레이어 메뉴에는 받은 것만 보임)
+  final facilityCatsLoaded = ValueNotifier<Set<String>>({});
 
   final hidden = ValueNotifier<Set<String>>({});
   List<String> _layerIds = []; // 지금 스타일의 레이어 id (MapPage가 채움)
@@ -988,8 +1266,9 @@ class MapControl {
   /// 가까운 수원지를 1~5 번호 붙은 점으로 (기본 파랑, 긴급 주황)
   Map<String, dynamic> _shelters = _emptyFc;
 
-  /// 민방위 대피소 전부 (한 번만, 자료를 받았을 때)
-  void setShelters(List<({double lat, double lon, String name})> pts) {
+  /// 대피·안전 시설 전부 (자료를 받았을 때 한 번). [cat]은 facilityCats의 id
+  void setShelters(List<({double lat, double lon, String name, String cat})> pts) {
+    facilityCatsLoaded.value = {for (final p in pts) p.cat};
     _shelters = {
       'type': 'FeatureCollection',
       'features': [
@@ -1000,7 +1279,7 @@ class MapControl {
               'type': 'Point',
               'coordinates': [p.lon, p.lat]
             },
-            'properties': {'name': p.name, 'kind': 'civil_shelter'},
+            'properties': {'name': p.name, 'kind': p.cat == 'shelter' ? 'civil_shelter' : 'fac_${p.cat}', 'cat': p.cat},
           }
       ],
     };
@@ -1014,7 +1293,10 @@ class MapControl {
         for (var i = 0; i < pts.length; i++)
           {
             'type': 'Feature',
-            'geometry': {'type': 'Point', 'coordinates': [pts[i].lon, pts[i].lat]},
+            'geometry': {
+              'type': 'Point',
+              'coordinates': [pts[i].lon, pts[i].lat]
+            },
             'properties': {'n': '${i + 1}', 'e': pts[i].emergency},
           }
       ],
@@ -1160,7 +1442,9 @@ class MapControl {
                 'type': 'Feature',
                 'geometry': {
                   'type': 'LineString',
-                  'coordinates': [for (final p in pts) [p.lon, p.lat]],
+                  'coordinates': [
+                    for (final p in pts) [p.lon, p.lat]
+                  ],
                 },
                 'properties': <String, dynamic>{},
               }
@@ -1178,7 +1462,9 @@ class MapControl {
             'type': 'Feature',
             'geometry': {
               'type': 'LineString',
-              'coordinates': [for (final p in pts) [p.lon, p.lat]],
+              'coordinates': [
+                for (final p in pts) [p.lon, p.lat]
+              ],
             },
             'properties': <String, dynamic>{},
           }
@@ -1230,7 +1516,10 @@ class MapControl {
         for (final w in list)
           {
             'type': 'Feature',
-            'geometry': {'type': 'Point', 'coordinates': [w.lon, w.lat]},
+            'geometry': {
+              'type': 'Point',
+              'coordinates': [w.lon, w.lat]
+            },
             'properties': {'name': w.name},
           }
       ],
@@ -1309,8 +1598,7 @@ class _MapPageState extends State<MapPage> {
     return CameraPosition(target: packs.isEmpty ? const LatLng(36.5, 127.8) : packs.first.center, zoom: 7);
   }
 
-  void _openDownloads() =>
-      Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage()));
+  void _openDownloads() => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage()));
 
   @override
   Widget build(BuildContext context) {
@@ -1340,24 +1628,24 @@ class _MapPageState extends State<MapPage> {
             onPointerUp: (e) => _pointers.remove(e.pointer),
             onPointerCancel: (e) => _pointers.remove(e.pointer),
             child: MapLibreMap(
-            key: ValueKey(_styleIds.join(',')), // 지도 추가/삭제 시 새 스타일로 다시 생성
-            styleString: style,
-            initialCameraPosition: _initialCamera(),
-            trackCameraPosition: true,
-            compassEnabled: false, // 나침반은 메인 화면의 버튼이 대신함
-            onMapCreated: ctl._attach,
-            onCameraMove: (cam) => ctl.camera.value = cam,
-            onStyleLoadedCallback: () {
-              ctl._styleLoaded();
-              _onSnap();
-            },
-            onCameraIdle: () {
-              final cam = ctl._ctl?.cameraPosition;
-              if (cam != null) _lastCamera = ctl.camera.value = cam;
-            },
-            onCameraTrackingDismissed: () => ctl.follow.value = false,
-            onMapLongClick: (_, ll) => ctl.onLongPress?.call(ll.latitude, ll.longitude),
-            onMapClick: ctl._tapped,
+              key: ValueKey(_styleIds.join(',')), // 지도 추가/삭제 시 새 스타일로 다시 생성
+              styleString: style,
+              initialCameraPosition: _initialCamera(),
+              trackCameraPosition: true,
+              compassEnabled: false, // 나침반은 메인 화면의 버튼이 대신함
+              onMapCreated: ctl._attach,
+              onCameraMove: (cam) => ctl.camera.value = cam,
+              onStyleLoadedCallback: () {
+                ctl._styleLoaded();
+                _onSnap();
+              },
+              onCameraIdle: () {
+                final cam = ctl._ctl?.cameraPosition;
+                if (cam != null) _lastCamera = ctl.camera.value = cam;
+              },
+              onCameraTrackingDismissed: () => ctl.follow.value = false,
+              onMapLongClick: (_, ll) => ctl.onLongPress?.call(ll.latitude, ll.longitude),
+              onMapClick: ctl._tapped,
             ),
           ),
           // 왼쪽 위: 축척 막대 + 지도 출처 (OpenStreetMap 표시는 필수)
@@ -1460,7 +1748,8 @@ class ScaleBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final mpp = metersPerDp(camera.target.latitude, camera.zoom);
     final m = niceLength(mpp);
-    final label = m >= 1000 ? '${(m / 1000).toStringAsFixed(m >= 10000 ? 0 : (m % 1000 == 0 ? 0 : 1))} km' : '${m.round()} m';
+    final label =
+        m >= 1000 ? '${(m / 1000).toStringAsFixed(m >= 10000 ? 0 : (m % 1000 == 0 ? 0 : 1))} km' : '${m.round()} m';
     const style = TextStyle(fontSize: 11, color: Colors.black87, fontWeight: FontWeight.w600);
     return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
       Text(label, style: style),
@@ -1594,9 +1883,18 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
     MapPack? mine(MapPack p) => installed.where((x) => x.id == p.id).firstOrNull;
     // 같은 날 다시 만든 파일은 날짜가 같으므로 크기도 비교
     bool fresh(MapPack p) => mine(p) != null && mine(p)!.date.compareTo(p.date) >= 0 && mine(p)!.size == p.size;
-    final busy = [for (final p in parts) if (progress.containsKey(p.id)) p];
-    final need = [for (final p in parts) if (!fresh(p) && !progress.containsKey(p.id)) p];
-    final failed = [for (final p in parts) if (store.failures.value[p.id] != null) store.failures.value[p.id]!];
+    final busy = [
+      for (final p in parts)
+        if (progress.containsKey(p.id)) p
+    ];
+    final need = [
+      for (final p in parts)
+        if (!fresh(p) && !progress.containsKey(p.id)) p
+    ];
+    final failed = [
+      for (final p in parts)
+        if (store.failures.value[p.id] != null) store.failures.value[p.id]!
+    ];
     final have = parts.where((p) => mine(p) != null).toList();
     final newest = parts.map((p) => p.date).reduce((a, b) => a.compareTo(b) >= 0 ? a : b);
 
@@ -1614,8 +1912,8 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
         }
       }
       fraction = done / total;
-      final waiting = busy.map((p) => progress[p.id]!.text).firstWhere((t) => !t.startsWith('다운로드 중'),
-          orElse: () => '');
+      final waiting =
+          busy.map((p) => progress[p.id]!.text).firstWhere((t) => !t.startsWith('다운로드 중'), orElse: () => '');
       sub = '받는 중 ${(fraction * 100).floor()}%  (${formatBytes(done.round())} / ${formatBytes(total)})'
           '${waiting.isEmpty ? '' : '\n$waiting'}';
       trailing = IconButton(
@@ -1629,7 +1927,8 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
       );
     } else if (need.isEmpty) {
       sub = '받음  ·  ${formatBytes(total)}  ·  $newest';
-      trailing = IconButton(icon: const Icon(Icons.delete_outline), tooltip: '삭제', onPressed: () => _deleteAll(title, have));
+      trailing =
+          IconButton(icon: const Icon(Icons.delete_outline), tooltip: '삭제', onPressed: () => _deleteAll(title, have));
     } else {
       final needSize = need.fold<int>(0, (a, p) => a + p.size);
       sub = failed.isNotEmpty
@@ -1701,7 +2000,18 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
 
 /// 카탈로그를 나라별로 묶음: "kr", "kr-terrain", "kr-labels", "kr-dem" -> 대한민국 하나
 List<List<MapPack>> bundleCatalog(List<MapPack> catalog) {
-  const order = ['basemap', 'terrain', 'hillshade', 'labels', 'dem', 'routes', 'drive', 'address', 'shelters'];
+  const order = [
+    'basemap',
+    'terrain',
+    'hillshade',
+    'labels',
+    'dem',
+    'routes',
+    'drive',
+    'address',
+    'shelters',
+    'facility'
+  ];
   final groups = <String, List<MapPack>>{};
   for (final p in catalog) {
     groups.putIfAbsent(p.id.split('-').first, () => []).add(p);
@@ -1750,6 +2060,7 @@ String? kindLabel(String? kind) => switch (kind) {
       'station' || 'train_station' || 'subway' => '역',
       'exit' || 'subway_entrance' => '지하철 출구',
       'civil_shelter' => '민방위 대피소',
+      final k when k.startsWith('fac_') => facilityLabel(k.substring(4)),
       'place_of_worship' => '종교시설',
       'hotel' || 'motel' || 'hostel' || 'guest_house' => '숙박',
       'museum' => '박물관',
@@ -1773,5 +2084,6 @@ String partLabel(MapPack p) => switch (p.kind) {
       'drive' => '자동차 길찾기',
       'address' => '주소 검색',
       'shelters' => '민방위 대피소',
+      'facility' => p.name.replaceFirst('대한민국 ', ''),
       _ => p.name,
     };
