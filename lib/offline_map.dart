@@ -635,14 +635,15 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
 
 // 이동 기록 선, 가까운 수원지, 저장한 지점, 내 위치 (맨 위)
 const _meLayers = [
-  // 민방위 대피소: 보라 점 (확대 11부터), 16부터 이름. 누르면 카드 (이름·종류·주소)
+  // 민방위 대피소: 보라 점 (확대 14부터: 덜 확대하면 점이 너무 많아 지도가 어지러움), 16부터 이름.
+  // 누르면 카드 (이름·종류·주소). 가까운 대피소는 왼쪽 아래 주변 정보에서 언제든
   {
     'id': 'shelters-pt',
     'type': 'circle',
     'source': 'shelters',
-    'minzoom': 11,
+    'minzoom': 14,
     'paint': {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 3, 15, 7],
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 4, 17, 7],
       'circle-color': '#7048e8',
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 1.5,
