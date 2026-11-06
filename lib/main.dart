@@ -27,7 +27,7 @@ class GnssApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'GNSS Tool',
+        title: '생존맵',
         debugShowCheckedModeBanner: false,
         theme: ThemeData.dark(useMaterial3: true),
         home: const HomePage(),

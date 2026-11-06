@@ -21,7 +21,7 @@
     <!-- 네트워크 상태는 MapLibre가 씀 (ConnectivityReceiver). 빼면 지도를 여는 순간 SecurityException으로 종료됨 -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <application
-        android:label="GNSS Tool"
+        android:label="생존맵"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
