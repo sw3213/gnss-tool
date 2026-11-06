@@ -532,6 +532,13 @@ class _MainScreenState extends State<MainScreen> {
     _onLongPress(h.lat, h.lon, name: h.title);
   }
 
+  /// 그 자리 도로 이름 ("구곡길"): 60 m 안 가장 가까운 도로명주소에서 번호를 뺀 것. 길 안내 띠에 씀
+  Future<String?> _roadNameAt(double lat, double lon) async {
+    final a = await _askAddressData((a) => a.nearest(lat, lon));
+    if (a == null || distanceM(lat, lon, a.lat, a.lon) > 60) return null;
+    return a.title.replaceFirst(RegExp(r'\s+[\d-]+$'), '');
+  }
+
   /// 주소 검색 자료로 묻기 (자료가 없거나 실패하면 null)
   Future<SearchHit?> _askAddressData(Future<SearchHit?> Function(AddressSearcher a) ask) async {
     final store = MapStore.instance;
@@ -952,21 +959,18 @@ class _MainScreenState extends State<MainScreen> {
                 ? MapPage(snap: widget.snap, control: widget.map, topInset: pad.top)
                 : SafeArea(child: SkyPage(snap: widget.snap)), // 웹 미리보기: 네이티브 지도 없음
           ),
-          // 경보·안내 띠 (맨 위)
+          // 맨 위: 길 안내 띠(다음에 꺾는 곳) -> 경보·안내 띠 -> 오른쪽에 GPS 상태·나침반·방위 (위에서부터 차례로, 겹치지 않게)
           Positioned(
             top: pad.top,
             left: 0,
             right: 0,
-            child: Column(children: [
+            child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              SizedBox(width: double.infinity, child: _TurnBanner(route: widget.route, roadNameAt: _roadNameAt)),
               _banner(widget.alert, Colors.red.shade900, Icons.thunderstorm, '확인', widget.onDismissAlert),
               _banner(widget.notice, Colors.blueGrey.shade800, Icons.info_outline, '다시 시도', widget.onRetrySource),
-            ]),
-          ),
-          // 오른쪽 위: GPS 상태, 나침반, 방위
-          Positioned(
-            top: pad.top + 8,
-            right: 10,
-            child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 8, right: 10),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
               _GpsStatusChip(snap: widget.snap, sourceLabel: widget.sourceLabel),
               const SizedBox(height: 10),
               // 메뉴를 펼치면 방위·전방 경사 글씨는 숨김 (메뉴 이름표와 겹치지 않게)
@@ -990,6 +994,8 @@ class _MainScreenState extends State<MainScreen> {
                       ),
                   ),
                 ]),
+              ),
+            ]),
               ),
             ]),
           ),
@@ -2056,5 +2062,115 @@ class _AdviceList extends StatelessWidget {
                     ),
                 ]),
               ),
+      );
+}
+
+// ---------------- 길 안내 띠 (경로를 따라갈 때 맨 위, 내비처럼) ----------------
+
+/// 꺾는 각도 -> 화살표 아이콘
+IconData turnIcon(double angle) {
+  final a = angle.abs(), left = angle < 0;
+  if (a >= 160) return left ? Icons.u_turn_left : Icons.u_turn_right;
+  if (a >= 120) return left ? Icons.turn_sharp_left : Icons.turn_sharp_right;
+  if (a >= 60) return left ? Icons.turn_left : Icons.turn_right;
+  if (a >= 35) return left ? Icons.turn_slight_left : Icons.turn_slight_right;
+  return Icons.straight;
+}
+
+/// "↰ 80 m 구곡길 방면" + 그다음 꺾는 곳. 경로를 벗어나면 빨간 띠, 꺾는 곳이 없으면 목적지까지
+class _TurnBanner extends StatefulWidget {
+  final RouteFollow route;
+  final Future<String?> Function(double lat, double lon) roadNameAt;
+  const _TurnBanner({required this.route, required this.roadNameAt});
+
+  @override
+  State<_TurnBanner> createState() => _TurnBannerState();
+}
+
+class _TurnBannerState extends State<_TurnBanner> {
+  GpxRoute? _for;
+  final _names = <double, Future<String?>>{}; // 꺾는 곳(RouteTurn.at) -> 꺾은 뒤 길 이름
+
+  /// 꺾고 나서 25 m 간 곳의 도로 이름
+  Future<String?> _nameAfter(GpxRoute r, RouteTurn t) {
+    if (!identical(r, _for)) {
+      _for = r;
+      _names.clear();
+    }
+    return _names.putIfAbsent(t.at, () {
+      final (la, lo) = r.pointAt(t.at + 25);
+      return widget.roadNameAt(la, lo);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<GpxRoute?>(
+        valueListenable: widget.route.route,
+        builder: (_, r, __) => r == null
+            ? const SizedBox.shrink()
+            : ValueListenableBuilder<RouteInfo?>(
+                valueListenable: widget.route.info,
+                builder: (_, i, __) {
+                  if (i == null) return const SizedBox.shrink();
+                  if (i.offRoute) {
+                    return _bar(const Color(0xFFC92A2A), Icons.wrong_location_outlined, '경로 이탈',
+                        '경로는 ${directionLabel(i.toRoute).split(' ').first}쪽 ${distanceLabel(i.off)}');
+                  }
+                  if (i.finished) return _bar(const Color(0xFF2B8A3E), Icons.flag, '도착', '목적지에 도착했습니다');
+                  final t = i.next, d = i.toNext;
+                  if (t == null || d == null) {
+                    return _bar(const Color(0xFF1C4FD6), Icons.flag_outlined, distanceLabel(i.left), '목적지까지 쭉');
+                  }
+                  final after = r.turns.where((x) => x.at > t.at).firstOrNull;
+                  return _bar(
+                    const Color(0xFF1C4FD6),
+                    turnIcon(t.angle),
+                    distanceLabel(d),
+                    null,
+                    name: _nameAfter(r, t),
+                    then: after == null
+                        ? null
+                        : (turnIcon(after.angle), '그다음 ${distanceLabel(after.at - t.at)}'),
+                  );
+                },
+              ),
+      );
+
+  Widget _bar(Color color, IconData icon, String big, String? small,
+          {Future<String?>? name, (IconData, String)? then}) =>
+      Material(
+        color: color,
+        elevation: 4,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Icon(icon, size: 44, color: Colors.white),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(big, style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w800, color: Colors.white)),
+                  if (small != null) Text(small, style: const TextStyle(fontSize: 15, color: Colors.white)),
+                  if (name != null)
+                    FutureBuilder<String?>(
+                      future: name,
+                      builder: (_, n) => n.data == null
+                          ? const SizedBox.shrink()
+                          : Text('${n.data} 방면', style: const TextStyle(fontSize: 15, color: Colors.white)),
+                    ),
+                ]),
+              ),
+            ]),
+            if (then != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(children: [
+                  Icon(then.$1, size: 20, color: Colors.white70),
+                  const SizedBox(width: 6),
+                  Text(then.$2, style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                ]),
+              ),
+          ]),
+        ),
       );
 }
