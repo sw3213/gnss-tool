@@ -1,6 +1,6 @@
 name: Shelter API probe (temporary)
 
-# 민방위대피시설 조회서비스의 요청 주소·결과 모양 확인용 (임시, 확인 후 삭제). 인증키는 Secret에서, 로그에는 가려짐
+# 민방위대피시설 조회서비스의 결과 모양 확인용 (임시, 확인 후 삭제). 인증키는 Secret에서, 로그에는 가려짐
 on:
   push:
     branches: [main-yievoq]
@@ -11,17 +11,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Try request addresses
+      - name: Try the key as given and URL-encoded
         env:
           KEY: ${{ secrets.DATA_GO_KR_KEY }}
         run: |
-          if [ -z "$KEY" ]; then echo "DATA_GO_KR_KEY 없음"; else echo "키 길이 ${#KEY}"; fi
-          base=https://apis.data.go.kr/1741000/civil_defense_shelter_info
-          for op in "" /info /getInfo /list /getList /civil_defense_shelter_info /getCivilDefenseShelterInfo; do
-            for rt in json; do
-              echo "=================== $op"
-              curl -sS -m 30 -G "$base$op" --data-urlencode "serviceKey=$KEY" \
-                -d pageNo=1 -d numOfRows=2 -d returnType=$rt -d type=$rt -o r.txt -w 'HTTP %{http_code} %{size_download}\n' || true
-              head -c 1500 r.txt; echo
-            done
-          done
+          case "$KEY" in *%*) echo "키에 % 있음 (Encoding 키로 보임)";; *) echo "키에 % 없음 (Decoding 키로 보임)";; esac
+          url=https://apis.data.go.kr/1741000/civil_defense_shelter_info/info
+          echo "=== 1. 키를 그대로"
+          curl -sS -m 30 "$url?serviceKey=$KEY&pageNo=1&numOfRows=2&returnType=json" -o a.txt -w 'HTTP %{http_code}\n' || true
+          head -c 3000 a.txt; echo
+          echo "=== 2. 키를 인코딩해서"
+          curl -sS -m 30 -G "$url" --data-urlencode "serviceKey=$KEY" -d pageNo=1 -d numOfRows=2 -d returnType=json \
+            -o b.txt -w 'HTTP %{http_code}\n' || true
+          head -c 3000 b.txt; echo
+          echo "=== 3. XML로"
+          curl -sS -m 30 "$url?serviceKey=$KEY&pageNo=1&numOfRows=2" -o c.txt -w 'HTTP %{http_code}\n' || true
+          head -c 3000 c.txt; echo
