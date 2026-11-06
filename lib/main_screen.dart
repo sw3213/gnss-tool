@@ -6,7 +6,7 @@ import 'dart:math' as math;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show Clipboard, ClipboardData, HapticFeedback;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData, HapticFeedback, MethodChannel;
 import 'package:maplibre_gl/maplibre_gl.dart' show CameraPosition;
 import 'package:path_provider/path_provider.dart';
 
@@ -102,6 +102,13 @@ class _MainScreenState extends State<MainScreen> {
     MapStore.instance.installed.addListener(_loadShelters);
     widget.snap.addListener(_updateShelters);
     _loadShelters();
+    if (isAndroid) {
+      _pip.setMethodCallHandler((c) async {
+        if (c.method == 'changed') _inPip.value = c.arguments == true;
+      });
+      widget.route.route.addListener(_syncPip);
+      _syncPip();
+    }
     widget.guide.info.addListener(_checkArrival);
     widget.route.info.addListener(_checkRoute);
   }
@@ -113,6 +120,7 @@ class _MainScreenState extends State<MainScreen> {
     MapStore.instance.installed.removeListener(_loadShelters);
     widget.snap.removeListener(_updateShelters);
     widget.map.camera.removeListener(_onCameraForFire);
+    widget.route.route.removeListener(_syncPip);
     widget.guide.info.removeListener(_checkArrival);
     widget.route.info.removeListener(_checkRoute);
     super.dispose();
@@ -249,6 +257,13 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   final _menuOpen = ValueNotifier<bool>(false); // 오른쪽 아래 메뉴 펼침
+
+  // ---- 화면 속 화면(작은 창): 경로를 따라가는 중에 홈 버튼을 누르면 길 안내 띠만 작게 (MainActivity.kt) ----
+  static const _pip = MethodChannel('gnss_tool/pip');
+  final _inPip = ValueNotifier<bool>(false);
+
+  /// 경로가 있을 때만 홈으로 나가면 작은 창이 되게
+  void _syncPip() => _pip.invokeMethod<bool>('setAuto', widget.route.route.value != null).catchError((Object _) => false);
 
   // ---- 민방위 대피소 (오프라인에서 받은 kr-shelters.json) ----
   ShelterIndex? _shelters;
@@ -948,7 +963,22 @@ class _MainScreenState extends State<MainScreen> {
       );
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ValueListenableBuilder<bool>(
+        valueListenable: _inPip,
+        builder: (context, pip, _) => pip ? _pipView() : _fullView(context),
+      );
+
+  /// 작은 창: 길 안내 띠만 창 크기에 맞춰
+  Widget _pipView() => Material(
+        color: const Color(0xFF1C4FD6),
+        child: Center(
+          child: FittedBox(
+            child: SizedBox(width: 340, child: _TurnBanner(route: widget.route, roadNameAt: _roadNameAt)),
+          ),
+        ),
+      );
+
+  Widget _fullView(BuildContext context) {
     final pad = MediaQuery.paddingOf(context);
     return Scaffold(
       backgroundColor: const Color(0xFF16181C),

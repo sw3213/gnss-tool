@@ -4,11 +4,13 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.app.ApplicationExitInfo
+import android.app.PictureInPictureParams
 import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -23,6 +25,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Rational
 import android.media.AudioAttributes
 import android.speech.tts.TextToSpeech
 import io.flutter.embedding.android.FlutterActivity
@@ -77,6 +80,36 @@ class MainActivity : FlutterActivity() {
 
     private fun say(text: String, flush: Boolean) {
         tts?.speak(text, if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, "g${ttsId++}")
+    }
+
+    // ---- 화면 속 화면(PIP): 길 안내 중에 홈 버튼을 누르면 작은 창으로 (권한 필요 없음) ----
+    //  gnss_tool/pip : setAuto(on) 앱 -> 안드로이드, changed(inPip) 안드로이드 -> 앱
+    private var pipAuto = false
+    private var pipChannel: MethodChannel? = null
+
+    private fun pipParams(): PictureInPictureParams? {
+        if (Build.VERSION.SDK_INT < 26) return null
+        val b = PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9))
+        if (Build.VERSION.SDK_INT >= 31) b.setAutoEnterEnabled(pipAuto) // 12+: 홈으로 갈 때 저절로 (부드럽게)
+        return b.build()
+    }
+
+    private fun setPipAuto(on: Boolean) {
+        pipAuto = on
+        if (Build.VERSION.SDK_INT >= 26) pipParams()?.let { runCatching { setPictureInPictureParams(it) } }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        // 8~11: 자동 진입이 없어 홈 버튼을 누를 때 직접 들어감
+        if (pipAuto && Build.VERSION.SDK_INT >= 26 && Build.VERSION.SDK_INT < 31) {
+            pipParams()?.let { runCatching { enterPictureInPictureMode(it) } }
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipChannel?.invokeMethod("changed", isInPictureInPictureMode)
     }
 
     override fun onDestroy() {
@@ -213,6 +246,18 @@ class MainActivity : FlutterActivity() {
                 }
                 "remove" -> result.success(dm.remove(call.argument<Number>("id")!!.toLong()))
                 else -> result.notImplemented()
+            }
+        }
+
+        pipChannel = MethodChannel(messenger, "gnss_tool/pip").also {
+            it.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setAuto" -> {
+                        setPipAuto(call.arguments as? Boolean ?: false)
+                        result.success(Build.VERSION.SDK_INT >= 26)
+                    }
+                    else -> result.notImplemented()
+                }
             }
         }
 
