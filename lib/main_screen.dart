@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
@@ -17,6 +18,7 @@ import 'nav.dart';
 import 'offline_map.dart';
 import 'routing.dart' show CarClass, RouteException, RouteMode, findRouteInBackground;
 import 'search_page.dart';
+import 'shelters.dart';
 import 'updater.dart';
 import 'voice.dart';
 import 'water.dart' show WaterSource, waterChipLabel;
@@ -96,6 +98,9 @@ class _MainScreenState extends State<MainScreen> {
     super.initState();
     widget.map.onLongPress = _onLongPress;
     widget.map.onTapPlace = (lat, lon, name, kind) => _onLongPress(lat, lon, name: name, kind: kind);
+    MapStore.instance.installed.addListener(_loadShelters);
+    widget.snap.addListener(_updateShelters);
+    _loadShelters();
     widget.guide.info.addListener(_checkArrival);
     widget.route.info.addListener(_checkRoute);
   }
@@ -104,6 +109,8 @@ class _MainScreenState extends State<MainScreen> {
   void dispose() {
     widget.map.onLongPress = null;
     widget.map.onTapPlace = null;
+    MapStore.instance.installed.removeListener(_loadShelters);
+    widget.snap.removeListener(_updateShelters);
     widget.guide.info.removeListener(_checkArrival);
     widget.route.info.removeListener(_checkRoute);
     super.dispose();
@@ -240,6 +247,96 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   final _menuOpen = ValueNotifier<bool>(false); // 오른쪽 아래 메뉴 펼침
+
+  // ---- 민방위 대피소 (오프라인에서 받은 kr-shelters.json) ----
+  ShelterIndex? _shelters;
+  String? _shelterFile;
+  (double, double)? _shelterAt; // 가까운 대피소를 마지막으로 찾은 위치
+  final _nearShelters = ValueNotifier<List<(Shelter, double)>>(const []);
+
+  /// 대피소 자료를 받았거나 업데이트했으면 읽어서 지도에 그림
+  Future<void> _loadShelters() async {
+    final store = MapStore.instance;
+    final p = store.installed.value.where((p) => p.kind == 'shelters').firstOrNull;
+    final path = p == null ? null : store.fileOf(p.id);
+    if (path == _shelterFile) return;
+    _shelterFile = path;
+    if (path == null) {
+      _shelters = null;
+      _nearShelters.value = const [];
+      widget.map.setShelters(const []);
+      return;
+    }
+    try {
+      final list = await Isolate.run(() => parseShelters(File(path).readAsStringSync()));
+      if (!mounted || path != _shelterFile) return;
+      _shelters = ShelterIndex(list);
+      widget.map.setShelters([for (final s in list) (lat: s.lat, lon: s.lon, name: s.name)]);
+      _shelterAt = null;
+      _updateShelters();
+    } catch (_) {}
+  }
+
+  /// 30 m 넘게 움직였을 때만 가까운 대피소를 다시 찾음 (5 km 안 5곳)
+  void _updateShelters() {
+    final idx = _shelters, s = widget.snap.value;
+    if (idx == null || s.lat == null || s.lon == null || s.fixQ == 0) return;
+    final at = _shelterAt;
+    if (at != null && distanceM(at.$1, at.$2, s.lat!, s.lon!) < 30) return;
+    _shelterAt = (s.lat!, s.lon!);
+    _nearShelters.value = idx.nearest(s.lat!, s.lon!);
+  }
+
+  /// 가까운 대피소 목록: 누르면 그 대피소 카드 (길 안내), 깃발은 바로 직선 안내
+  void _showShelters() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          child: ValueListenableBuilder<List<(Shelter, double)>>(
+            valueListenable: _nearShelters,
+            builder: (_, near, __) {
+              final s = widget.snap.value;
+              return Column(mainAxisSize: MainAxisSize.min, children: [
+                const ListTile(
+                  title: Text('가까운 민방위 대피소', style: TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text('행정안전부 자료 (매달 갱신). 공습·재난 때 가장 가까운 곳으로, 지하 시설이 더 안전합니다'),
+                ),
+                if (near.isEmpty) const ListTile(title: Text('5 km 안에 대피소가 없습니다')),
+                for (final (sh, d) in near)
+                  ListTile(
+                    leading: Icon(sh.underground ? Icons.shield : Icons.shield_outlined, color: const Color(0xFF7048E8)),
+                    title: Text(sh.name),
+                    subtitle: Text([
+                      s.lat == null
+                          ? distanceLabel(d)
+                          : '${distanceLabel(d)}  ·  ${directionLabel(bearingDeg(s.lat!, s.lon!, sh.lat, sh.lon))}',
+                      sh.summary,
+                      if (sh.address.isNotEmpty) sh.address,
+                    ].join('\n')),
+                    isThreeLine: true,
+                    trailing: IconButton(
+                      icon: const Icon(Icons.flag_outlined),
+                      tooltip: '여기로 안내',
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _guideTo(NavTarget(sh.name, sh.lat, sh.lon));
+                      },
+                    ),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      widget.map.showPlace(sh.lat, sh.lon);
+                      _onLongPress(sh.lat, sh.lon, name: sh.name, kind: '민방위 대피소 · ${sh.summary}');
+                    },
+                  ),
+              ]);
+            },
+          ),
+        ),
+      ),
+    );
+  }
 
   /// 메뉴 버튼 위로 펼쳐지는 버튼들 (위에서 아래 순서). 옆에 이름표를 붙여 무슨 버튼인지 보이게
   List<Widget> _menuButtons() {
@@ -760,6 +857,19 @@ class _MainScreenState extends State<MainScreen> {
               left: 10,
               bottom: ext * box.maxHeight + 10,
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                // "대피소 350 m 외 4곳" — 누르면 가까운 대피소 목록 (지도에는 보라 점)
+                ValueListenableBuilder<List<(Shelter, double)>>(
+                  valueListenable: _nearShelters,
+                  builder: (_, near, __) => near.isEmpty
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: GestureDetector(
+                            onTap: _showShelters,
+                            child: _MapChip(icon: Icons.shield_outlined, text: shelterChipLabel(near)),
+                          ),
+                        ),
+                ),
                 // "수원지 1.5 km 외 2곳" — 누르면 목록, 지도에는 1~5 번호 점 (기본 파랑, 긴급 주황)
                 ValueListenableBuilder<List<WaterSource>>(
                   valueListenable: widget.analysis.water,

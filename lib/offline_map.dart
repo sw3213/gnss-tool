@@ -253,7 +253,7 @@ Future<String> buildStyle(List<MapPack> packs) async {
 
   const empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
   final sources = <String, dynamic>{
-    for (final id in ['me', 'track', 'wpts', 'water', 'target', 'route', 'pick']) id: {'type': 'geojson', 'data': empty},
+    for (final id in ['me', 'track', 'wpts', 'water', 'target', 'route', 'pick', 'shelters']) id: {'type': 'geojson', 'data': empty},
   };
   final layers = <Map<String, dynamic>>[
     for (final l in base)
@@ -635,6 +635,34 @@ List<Map<String, dynamic>> _extraLayers(String s) => [
 
 // 이동 기록 선, 가까운 수원지, 저장한 지점, 내 위치 (맨 위)
 const _meLayers = [
+  // 민방위 대피소: 보라 점 (확대 11부터), 16부터 이름. 누르면 카드 (이름·종류·주소)
+  {
+    'id': 'shelters-pt',
+    'type': 'circle',
+    'source': 'shelters',
+    'minzoom': 11,
+    'paint': {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 3, 15, 7],
+      'circle-color': '#7048e8',
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 1.5,
+    },
+  },
+  {
+    'id': 'shelters-label',
+    'type': 'symbol',
+    'source': 'shelters',
+    'minzoom': 16,
+    'layout': {
+      'text-field': ['get', 'name'],
+      'text-font': ['NotoSansMedium'],
+      'text-size': 11,
+      'text-anchor': 'top',
+      'text-offset': [0, 0.7],
+      'text-max-width': 9,
+    },
+    'paint': {'text-color': '#5f3dc4', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5},
+  },
   {
     'id': 'water-pt',
     'type': 'circle',
@@ -889,6 +917,7 @@ class MapControl {
     _ctl?.setGeoJsonSource('track', _track);
     _ctl?.setGeoJsonSource('wpts', _wpts);
     _ctl?.setGeoJsonSource('water', _water);
+    _ctl?.setGeoJsonSource('shelters', _shelters);
     _drawTarget();
     _ctl?.setGeoJsonSource('route', _route);
     _drawPick();
@@ -914,6 +943,7 @@ class MapControl {
     (id: 'trails', label: '등산로 강조', icon: Icons.hiking, suffixes: ['-trails']),
     (id: 'pois', label: '장소 아이콘', icon: Icons.place_outlined, suffixes: ['-pois']),
     (id: 'dong', label: '건물·아파트 이름', icon: Icons.apartment, suffixes: ['-dong', '-complex']),
+    (id: 'shelters', label: '민방위 대피소', icon: Icons.shield_outlined, suffixes: ['shelters-pt', 'shelters-label']),
     (id: 'exit', label: '지하철 출구 번호', icon: Icons.subway_outlined, suffixes: ['-exit', '-exit-no']),
     (id: 'water', label: '수원지 번호', icon: Icons.water_drop_outlined, suffixes: ['water-pt', 'water-num']),
   ];
@@ -946,6 +976,27 @@ class MapControl {
   }
 
   /// 가까운 수원지를 1~5 번호 붙은 점으로 (기본 파랑, 긴급 주황)
+  Map<String, dynamic> _shelters = _emptyFc;
+
+  /// 민방위 대피소 전부 (한 번만, 자료를 받았을 때)
+  void setShelters(List<({double lat, double lon, String name})> pts) {
+    _shelters = {
+      'type': 'FeatureCollection',
+      'features': [
+        for (final p in pts)
+          {
+            'type': 'Feature',
+            'geometry': {
+              'type': 'Point',
+              'coordinates': [p.lon, p.lat]
+            },
+            'properties': {'name': p.name, 'kind': 'civil_shelter'},
+          }
+      ],
+    };
+    if (_ready) _ctl?.setGeoJsonSource('shelters', _shelters);
+  }
+
   void setWater(List<({double lat, double lon, bool emergency})> pts) {
     _water = {
       'type': 'FeatureCollection',
@@ -1635,7 +1686,7 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
 
 /// 카탈로그를 나라별로 묶음: "kr", "kr-terrain", "kr-labels", "kr-dem" -> 대한민국 하나
 List<List<MapPack>> bundleCatalog(List<MapPack> catalog) {
-  const order = ['basemap', 'terrain', 'hillshade', 'labels', 'dem', 'routes', 'drive', 'address'];
+  const order = ['basemap', 'terrain', 'hillshade', 'labels', 'dem', 'routes', 'drive', 'address', 'shelters'];
   final groups = <String, List<MapPack>>{};
   for (final p in catalog) {
     groups.putIfAbsent(p.id.split('-').first, () => []).add(p);
@@ -1683,6 +1734,7 @@ String? kindLabel(String? kind) => switch (kind) {
       'bus_stop' || 'bus_station' => '버스 정류장',
       'station' || 'train_station' || 'subway' => '역',
       'exit' || 'subway_entrance' => '지하철 출구',
+      'civil_shelter' => '민방위 대피소',
       'place_of_worship' => '종교시설',
       'hotel' || 'motel' || 'hostel' || 'guest_house' => '숙박',
       'museum' => '박물관',
@@ -1705,5 +1757,6 @@ String partLabel(MapPack p) => switch (p.kind) {
       'routes' => '길찾기',
       'drive' => '자동차 길찾기',
       'address' => '주소 검색',
+      'shelters' => '민방위 대피소',
       _ => p.name,
     };
