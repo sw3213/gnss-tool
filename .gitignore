@@ -15,3 +15,4 @@ key.properties
 
 # Local browser preview only (`flutter create --platforms=web`)
 web/
+__pycache__/
