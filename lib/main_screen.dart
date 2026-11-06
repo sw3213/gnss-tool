@@ -539,6 +539,7 @@ class _MainScreenState extends State<MainScreen> {
     final elev = widget.analysis.elevationAt(lat, lon);
     final address = _askAddressData((a) => a.nearest(lat, lon)); // 가장 가까운 도로명주소 (120 m 안)
     final place = _askAddressData((a) => a.nearestPlaceAt(lat, lon)); // 그 자리 건물·가게 이름 (40 m 안)
+    final fire = widget.analysis.fireAt(lat, lon); // 그 자리에서 불을 써도 되는지 (숲 100 m·국립공원)
     widget.map.setPick(lat, lon); // 메뉴가 열려 있는 동안 고른 곳에 빨간 점
     const sub = TextStyle(fontSize: 13, color: Colors.white70);
     showModalBottomSheet<void>(
@@ -583,6 +584,25 @@ class _MainScreenState extends State<MainScreen> {
                           '${directionLabel(bearingDeg(s.lat!, s.lon!, lat, lon))}',
                   ].join('  ·  '),
                   style: sub),
+              // 불 사용 (참고): "🔥 불 가능 · 숲까지 150 m" / "불 금지 · 숲까지 40 m"
+              FutureBuilder<FireStatus?>(
+                future: fire,
+                builder: (_, f) {
+                  final st = f.data;
+                  if (st == null) return const SizedBox.shrink();
+                  final color = st.banned ? Colors.redAccent : Colors.lightGreenAccent;
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Icon(Icons.local_fire_department_outlined, size: 16, color: color),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text('${st.chip} · ${st.summary}', style: TextStyle(fontSize: 13, color: color)),
+                      ),
+                    ]),
+                  );
+                },
+              ),
               // 좌표: 누르면 복사 (검색창에 그대로 붙여 넣어 찾을 수 있는 모양)
               InkWell(
                 onTap: () => copyCoordinates(context, lat, lon),

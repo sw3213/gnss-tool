@@ -185,6 +185,17 @@ class TerrainAnalysis {
         .whenComplete(() => _fireBusy = false);
   }
 
+  /// 아무 곳(지도에서 누른 곳 등)의 불 사용 참고 정보. 대한민국 지도가 없으면 null
+  Future<FireStatus?> fireAt(double lat, double lon) async {
+    final mapPath = _mapPath;
+    if (mapPath == null) return null;
+    try {
+      return await compute(_findFire, (mapPath, lat, lon));
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 고도 데이터의 지면 고도 (m). 고도 데이터가 없으면 null
   double? elevationAt(double lat, double lon) => _dem?.elevation(lat, lon);
 
