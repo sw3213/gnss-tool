@@ -1,6 +1,6 @@
 name: Dust shelter API probe (temporary)
 
-# 에어코리아 미세먼지 쉼터 API의 기능 이름·결과 모양 확인용 (임시, 확인 후 삭제)
+# 에어코리아 미세먼지 쉼터 API: 전체 건수가 너무 많아(428만) 연도·쪽 크기로 줄일 수 있는지 확인 (임시)
 on:
   push:
     branches: [main-yievoq]
@@ -11,13 +11,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Try operation names
+      - name: Narrow the list
         env:
           KEY: ${{ secrets.DATA_GO_KR_KEY }}
         run: |
-          base=https://apis.data.go.kr/B552584/ptcShuntPlaceService
-          for op in getShuntPlaceList getPtcShuntPlaceList getShuntPlaceInfo getPtcShuntPlaceInfo getList getShuntPlace getPtcShuntPlace; do
-            echo "=================== $op"
-            curl -sS -m 30 "$base/$op?serviceKey=$KEY&pageNo=1&numOfRows=2&returnType=json" -o r.txt -w 'HTTP %{http_code}\n' || true
-            head -c 1500 r.txt; echo
-          done
+          u=https://apis.data.go.kr/B552584/ptcShuntPlaceService/getList
+          show() { echo "=== $1"; curl -sS -m 60 "$u?serviceKey=$KEY&returnType=json&$1" -o r.txt -w 'HTTP %{http_code} %{size_download}\n' || true
+                   python3 -c "import json,sys
+          try:
+            d=json.load(open('r.txt'));b=d['body'];its=b['items']
+            print('total',b['totalCount'],'rows',len(its))
+            for it in its[:3]: print({k:it.get(k) for k in ('operYr','ctpvNm','shltrNm','fcltTypeNm','lat','lot')})
+          except Exception as e: print(open('r.txt').read()[:400])"; }
+          show "pageNo=1&numOfRows=1000"
+          show "pageNo=1&numOfRows=3&operYr=2026"
+          show "pageNo=1&numOfRows=3&operYr=2025"
+          show "pageNo=1&numOfRows=3&year=2025"
+          show "pageNo=4285&numOfRows=1000"
+          show "pageNo=2000&numOfRows=3"
