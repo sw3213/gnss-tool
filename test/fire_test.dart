@@ -33,4 +33,28 @@ void main() {
     expect(isForest({'kind': 'wood'}), isTrue);
     expect(isForest({'kind': 'park'}), isFalse);
   });
+
+  test('fire grid: forest, the 100 m band around it, and national parks', () {
+    // 가운데(37.0, 127.0)에서 동쪽 0.005도(약 444 m)부터 숲, 남쪽 끝에 국립공원
+    final forest = [
+      [(36.99, 127.005), (36.99, 127.03), (37.01, 127.03), (37.01, 127.005), (36.99, 127.005)]
+    ];
+    final park = [
+      [(36.98, 126.97), (36.98, 127.03), (36.985, 127.03), (36.985, 126.97), (36.98, 126.97)]
+    ];
+    final g = fireGridFrom([forest], [park], 37.0, 127.0, halfM: 2000, cellM: 10);
+    expect(g.n, 400);
+    int at(double lat, double lon) {
+      final r = ((g.north - lat) / (g.north - g.south) * g.n).floor();
+      final c = ((lon - g.west) / (g.east - g.west) * g.n).floor();
+      return g.cells[r * g.n + c];
+    }
+
+    expect(at(37.0, 127.0), 0); // 숲에서 약 444 m: 가능
+    expect(at(37.0, 127.006), 1); // 숲 안
+    expect(at(37.0, 127.0045), 1); // 숲에서 약 44 m
+    expect(at(37.0, 127.0035), 0); // 숲에서 약 133 m
+    expect(at(36.9835, 126.995), 2); // 국립공원
+    expect(g.rgba().length, 400 * 400 * 4);
+  });
 }

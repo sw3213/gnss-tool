@@ -38,6 +38,16 @@ FireStatus _findFire((String, double, double) a) {
   }
 }
 
+/// 별도 스레드: 불 사용 지도 (가운데에서 2 km 안)
+FireGrid _findFireGrid((String, double, double) a) {
+  final pm = PmTiles.open(a.$1);
+  try {
+    return fireGrid(pm, a.$2, a.$3);
+  } finally {
+    pm.close();
+  }
+}
+
 class TerrainAnalysis {
   final ValueListenable<GnssSnapshot> snap;
   final ValueListenable<double?> heading;
@@ -194,6 +204,19 @@ class TerrainAnalysis {
     } catch (_) {
       return null;
     }
+  }
+
+  /// [lat]/[lon] 둘레 2 km의 불 사용 지도 그림 (png, 북, 남, 서, 동). 대한민국 지도가 없으면 null
+  Future<(Uint8List, double, double, double, double)?> fireMapImage(double lat, double lon) async {
+    final mapPath = _mapPath;
+    if (mapPath == null) return null;
+    final g = await compute(_findFireGrid, (mapPath, lat, lon));
+    final done = Completer<ui.Image>();
+    ui.decodeImageFromPixels(g.rgba(), g.n, g.n, ui.PixelFormat.rgba8888, done.complete);
+    final img = await done.future;
+    final png = await img.toByteData(format: ui.ImageByteFormat.png);
+    img.dispose();
+    return png == null ? null : (png.buffer.asUint8List(), g.north, g.south, g.west, g.east);
   }
 
   /// 고도 데이터의 지면 고도 (m). 고도 데이터가 없으면 null

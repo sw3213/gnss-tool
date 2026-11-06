@@ -1187,12 +1187,13 @@ class MapControl {
   }
 
   /// 가시권 그림(가려진 곳 어둡게)을 지도에 겹침. 내 위치·이동 기록 선 아래에 그림
-  Future<void> showViewshed(Uint8List png, double north, double south, double west, double east) async {
+  /// 지도 위에 그림 겹치기 ([id]마다 하나: 가시권 'viewshed', 불 사용 지역 'fire'). 이동 기록 선 아래에 그림
+  Future<void> showOverlay(String id, Uint8List png, double north, double south, double west, double east) async {
     final c = _ctl;
     if (c == null || !_ready) return;
-    await hideViewshed();
+    await hideOverlay(id);
     await c.addImageSource(
-      'viewshed',
+      id,
       png,
       LatLngQuad(
         topLeft: LatLng(north, west),
@@ -1202,20 +1203,24 @@ class MapControl {
       ),
     );
     // 두 번째 인자가 그림 소스, 세 번째가 "이 레이어 아래에" (플러그인 인자 이름이 헷갈리게 되어 있음)
-    await c.addImageLayerBelow('viewshed', 'viewshed', 'track');
-    _viewshedShown = true;
+    await c.addImageLayerBelow(id, id, 'track');
+    _overlays.add(id);
   }
 
-  bool _viewshedShown = false;
+  final _overlays = <String>{};
 
-  Future<void> hideViewshed() async {
-    if (!_viewshedShown) return;
-    _viewshedShown = false;
+  Future<void> hideOverlay(String id) async {
+    if (!_overlays.remove(id)) return;
     try {
-      await _ctl?.removeLayer('viewshed');
-      await _ctl?.removeSource('viewshed');
+      await _ctl?.removeLayer(id);
+      await _ctl?.removeSource(id);
     } catch (_) {}
   }
+
+  Future<void> showViewshed(Uint8List png, double north, double south, double west, double east) =>
+      showOverlay('viewshed', png, north, south, west, east);
+
+  Future<void> hideViewshed() => hideOverlay('viewshed');
 
   void setWaypoints(List<Waypoint> list) {
     _wpts = {

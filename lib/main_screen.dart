@@ -112,6 +112,7 @@ class _MainScreenState extends State<MainScreen> {
     widget.map.onTapPlace = null;
     MapStore.instance.installed.removeListener(_loadShelters);
     widget.snap.removeListener(_updateShelters);
+    widget.map.camera.removeListener(_onCameraForFire);
     widget.guide.info.removeListener(_checkArrival);
     widget.route.info.removeListener(_checkRoute);
     super.dispose();
@@ -460,6 +461,18 @@ class _MainScreenState extends State<MainScreen> {
         ),
       ),
       ValueListenableBuilder<bool>(
+        valueListenable: _fireOn,
+        builder: (_, on, __) => labeled(
+          '불 사용 지역',
+          _RoundButton(
+            tooltip: '불 사용 지역 (초록 가능 · 빨강 금지)',
+            active: on,
+            onTap: _toggleFireMap,
+            child: const Icon(Icons.local_fire_department_outlined, size: 22),
+          ),
+        ),
+      ),
+      ValueListenableBuilder<bool>(
         valueListenable: widget.map.tilted,
         builder: (_, on, __) => labeled(
           '3D',
@@ -782,6 +795,61 @@ class _MainScreenState extends State<MainScreen> {
         ),
       ),
     );
+  }
+
+  // ---- 🔥 불 사용 지역: 지도 가운데 둘레 2 km를 초록(가능)·빨강(금지)으로 ----
+  final _fireOn = ValueNotifier<bool>(false);
+  (double, double)? _fireCenter; // 마지막으로 칠한 곳의 가운데
+  bool _fireBusy = false;
+
+  Future<void> _toggleFireMap() async {
+    if (_fireOn.value) {
+      _fireOn.value = false;
+      widget.map.camera.removeListener(_onCameraForFire);
+      await widget.map.hideOverlay('fire');
+      return;
+    }
+    final ok = await _drawFireMap();
+    if (!ok || !mounted) return;
+    _fireOn.value = true;
+    widget.map.camera.addListener(_onCameraForFire);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      duration: Duration(seconds: 6),
+      content: Text('초록 = 불 사용 가능해 보이는 곳 (숲에서 100 m 밖), 빨강 = 금지 (숲·숲 100 m 안·국립공원)\n'
+          '지도 가운데 둘레 2 km, 지도에 그려진 숲 기준이라 참고용입니다'),
+    ));
+  }
+
+  /// 지도 가운데 둘레를 다시 칠함. 대한민국 지도가 없으면 false
+  Future<bool> _drawFireMap() async {
+    final c = widget.map.camera.value?.target;
+    if (c == null || _fireBusy) return false;
+    _fireBusy = true;
+    try {
+      final img = await widget.analysis.fireMapImage(c.latitude, c.longitude);
+      if (img == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('불 사용 지역은 "대한민국" 지도를 받아야 볼 수 있습니다')));
+        }
+        return false;
+      }
+      final (png, n, s, w, e) = img;
+      await widget.map.showOverlay('fire', png, n, s, w, e);
+      _fireCenter = (c.latitude, c.longitude);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      _fireBusy = false;
+    }
+  }
+
+  /// 지도를 1.2 km 넘게 옮기면 새 가운데 둘레를 다시 칠함
+  void _onCameraForFire() {
+    final c = widget.map.camera.value?.target, f = _fireCenter;
+    if (!_fireOn.value || c == null || f == null) return;
+    if (distanceM(f.$1, f.$2, c.latitude, c.longitude) > 1200) _drawFireMap();
   }
 
   /// 👁 가시권: 현재 위치에서 5 km 안 지형에 가려 안 보이는 곳을 어둡게

@@ -530,3 +530,26 @@ double areaDistanceM(List<List<(double, double)>> rings, double lat, double lon)
   }
   return best;
 }
+
+/// 상자([south]~[north], [west]~[east]) 안에 걸친 [layer]의 면 중 [match]에 맞는 것을 모두 (위도·경도 테두리 목록, 속성)
+List<(List<List<(double, double)>>, Map<String, Object?>)> areasIn(PmTiles pm, double south, double west, double north,
+    double east, String layer, bool Function(Map<String, Object?> props) match) {
+  final (x0, y0) = _tileXY(north, west);
+  final (x1, y1) = _tileXY(south, east);
+  final out = <(List<List<(double, double)>>, Map<String, Object?>)>[];
+  for (var ty = y0; ty <= y1; ty++) {
+    for (var tx = x0; tx <= x1; tx++) {
+      final bytes = pm.tile(_zoom, tx, ty);
+      if (bytes == null) continue;
+      for (final l in decodeMvt(bytes, {layer})) {
+        for (final f in l.features) {
+          if (f.type != 3 || !match(f.props)) continue;
+          out.add(([
+            for (final r in f.rings) [for (final p in r) _tileToLatLon(tx, ty, l.extent, p)]
+          ], f.props));
+        }
+      }
+    }
+  }
+  return out;
+}
