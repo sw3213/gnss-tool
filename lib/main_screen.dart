@@ -287,6 +287,72 @@ class _MainScreenState extends State<MainScreen> {
     _nearShelters.value = idx.nearest(s.lat!, s.lon!);
   }
 
+  /// 주변 정보: 가장 가까운 대피소·수원지와 해 정보를 한 화면에. 줄을 누르면 자세히
+  void _showNearby() {
+    final a = widget.analysis;
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const ListTile(title: Text('주변 정보', style: TextStyle(fontWeight: FontWeight.bold))),
+          ValueListenableBuilder<List<(Shelter, double)>>(
+            valueListenable: _nearShelters,
+            builder: (_, near, __) => ListTile(
+              leading: const Icon(Icons.shield_outlined, color: Color(0xFF7048E8)),
+              title: const Text('민방위 대피소'),
+              subtitle: Text(near.isEmpty
+                  ? (_shelters == null ? '오프라인에서 "민방위 대피소" 자료를 받으면 보입니다' : '5 km 안에 없음')
+                  : '${near.first.$1.name} · ${shelterChipLabel(near).replaceFirst('대피소 ', '')}'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () {
+                Navigator.pop(ctx);
+                if (_shelters == null) {
+                  Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage()));
+                } else {
+                  _showShelters();
+                }
+              },
+            ),
+          ),
+          ValueListenableBuilder<List<WaterSource>>(
+            valueListenable: a.water,
+            builder: (_, ws, __) => ListTile(
+              leading: Icon(ws.any((w) => w.emergency) ? Icons.warning_amber_rounded : Icons.water_drop_outlined,
+                  color: _waterColor),
+              title: const Text('수원지'),
+              subtitle: Text(ws.isEmpty ? '주변 10 km 안에 찾은 수원지 없음' : waterChipLabel(ws).replaceFirst('수원지 ', '')),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showWater();
+              },
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.wb_twilight, color: Colors.orangeAccent),
+            title: const Text('해'),
+            subtitle: Text(a.sunChip(DateTime.now()) ?? '고도 데이터가 있어야 지형을 고려한 일출·일몰을 계산합니다'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () {
+              Navigator.pop(ctx);
+              final d = a.sunDetail();
+              if (d == null) return _needDem();
+              showDialog<void>(
+                context: context,
+                builder: (c) => AlertDialog(
+                  title: const Text('오늘 해'),
+                  content: Text(d),
+                  actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('닫기'))],
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 8),
+        ]),
+      ),
+    );
+  }
+
   /// 가까운 대피소 목록: 누르면 그 대피소 카드 (길 안내), 깃발은 바로 직선 안내
   void _showShelters() {
     showModalBottomSheet<void>(
@@ -639,22 +705,35 @@ class _MainScreenState extends State<MainScreen> {
 
   /// 레이어 켜고 끄기 (등고선, 고도 색칠, 등산로…). 선택은 저장되어 다음에도 유지
   void _showLayers() {
+    var cat = MapControl.layerCategories.first;
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       builder: (ctx) => SafeArea(
-        child: SingleChildScrollView(
-          child: ValueListenableBuilder<Set<String>>(
+        child: StatefulBuilder(
+          builder: (ctx, setSheet) => ValueListenableBuilder<Set<String>>(
             valueListenable: widget.map.hidden,
             builder: (_, hidden, __) => Column(mainAxisSize: MainAxisSize.min, children: [
               const ListTile(title: Text('지도 레이어', style: TextStyle(fontWeight: FontWeight.bold))),
-              for (final g in MapControl.layerGroups)
-                SwitchListTile(
+              // 분류 고르기 (안전디딤돌 안전지도처럼)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(children: [
+                  for (final c in MapControl.layerCategories)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(label: Text(c), selected: c == cat, onSelected: (_) => setSheet(() => cat = c)),
+                    ),
+                ]),
+              ),
+              for (final g in MapControl.layerGroups.where((g) => g.cat == cat))
+                CheckboxListTile(
                   secondary: Icon(g.icon),
                   title: Text(g.label),
                   value: !hidden.contains(g.id),
-                  onChanged: (on) => widget.map.setLayerShown(g.id, on),
+                  onChanged: (on) => widget.map.setLayerShown(g.id, on ?? false),
                 ),
+              const SizedBox(height: 8),
             ]),
           ),
         ),
@@ -850,57 +929,16 @@ class _MainScreenState extends State<MainScreen> {
               ),
             ),
           ),
-          // 왼쪽 아래(패널 위): 일출·일몰까지 남은 시간
+          // 왼쪽 아래(패널 위): "주변 정보" 한 줄 (대피소 · 수원지 · 해). 누르면 한 화면에 모아 보기
           ValueListenableBuilder<double>(
             valueListenable: _sheet,
             builder: (_, ext, __) => Positioned(
               left: 10,
               bottom: ext * box.maxHeight + 10,
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                // "대피소 350 m 외 4곳" — 누르면 가까운 대피소 목록 (지도에는 보라 점)
-                ValueListenableBuilder<List<(Shelter, double)>>(
-                  valueListenable: _nearShelters,
-                  builder: (_, near, __) => near.isEmpty
-                      ? const SizedBox.shrink()
-                      : Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: GestureDetector(
-                            onTap: _showShelters,
-                            child: _MapChip(icon: Icons.shield_outlined, text: shelterChipLabel(near)),
-                          ),
-                        ),
-                ),
-                // "수원지 1.5 km 외 2곳" — 누르면 목록, 지도에는 1~5 번호 점 (기본 파랑, 긴급 주황)
-                ValueListenableBuilder<List<WaterSource>>(
-                  valueListenable: widget.analysis.water,
-                  builder: (_, ws, __) => ws.isEmpty
-                      ? const SizedBox.shrink()
-                      : Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: GestureDetector(
-                            onTap: _showWater,
-                            child: _MapChip(
-                                icon: ws.any((w) => w.emergency) ? Icons.warning_amber_rounded : Icons.water_drop_outlined,
-                                text: waterChipLabel(ws)),
-                          ),
-                        ),
-                ),
-                GestureDetector(
-                  onTap: () {
-                    final d = widget.analysis.sunDetail();
-                    if (d == null) return _needDem();
-                    showDialog<void>(
-                      context: context,
-                      builder: (ctx) => AlertDialog(
-                        title: const Text('오늘 해'),
-                        content: Text(d),
-                        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('닫기'))],
-                      ),
-                    );
-                  },
-                  child: _SunChip(analysis: widget.analysis),
-                ),
-              ]),
+              child: GestureDetector(
+                onTap: _showNearby,
+                child: _NearbyChip(shelters: _nearShelters, analysis: widget.analysis),
+              ),
             ),
           ),
           // 아래 정보 패널 (끌어올리면 더 보임)
@@ -1064,26 +1102,59 @@ class _RoundButton extends StatelessWidget {
 }
 
 /// "일출까지 7시간 31분" — 고도 데이터가 있으면 산 능선 위로 해가 보이는 시각 기준
-class _SunChip extends StatefulWidget {
+/// 왼쪽 아래 한 줄: "🛡 350 m  💧 440 m  🌅 1시간 21분" (있는 것만). 30초마다 해 시간 갱신
+class _NearbyChip extends StatefulWidget {
+  final ValueListenable<List<(Shelter, double)>> shelters;
   final TerrainAnalysis analysis;
-  const _SunChip({required this.analysis});
+  const _NearbyChip({required this.shelters, required this.analysis});
 
   @override
-  State<_SunChip> createState() => _SunChipState();
+  State<_NearbyChip> createState() => _NearbyChipState();
 }
 
-class _SunChipState extends State<_SunChip> {
+class _NearbyChipState extends State<_NearbyChip> {
   late final Stream<int> _tick = Stream.periodic(const Duration(seconds: 30), (i) => i);
 
   @override
   Widget build(BuildContext context) => StreamBuilder<int>(
         stream: _tick,
-        builder: (_, __) => ValueListenableBuilder(
-          valueListenable: widget.analysis.sunToday,
-          builder: (_, __, ___) {
-            final text = widget.analysis.sunChip(DateTime.now());
-            if (text == null) return const SizedBox.shrink();
-            return _MapChip(icon: text.startsWith('일출') ? Icons.wb_twilight : Icons.wb_sunny_outlined, text: text);
+        builder: (_, __) => AnimatedBuilder(
+          animation: Listenable.merge([widget.shelters, widget.analysis.water, widget.analysis.sunToday]),
+          builder: (_, __) {
+            final near = widget.shelters.value, ws = widget.analysis.water.value;
+            final sun = widget.analysis.sunChip(DateTime.now());
+            final parts = <(IconData, Color, String)>[
+              if (near.isNotEmpty) (Icons.shield_outlined, const Color(0xFFB197FC), distanceLabel(near.first.$2)),
+              if (ws.isNotEmpty)
+                (
+                  ws.any((w) => w.emergency) ? Icons.warning_amber_rounded : Icons.water_drop_outlined,
+                  const Color(0xFF74C0FC),
+                  distanceLabel(ws.first.distanceM)
+                ),
+              if (sun != null)
+                (
+                  sun.startsWith('일출') ? Icons.wb_twilight : Icons.wb_sunny_outlined,
+                  Colors.orangeAccent,
+                  sun.replaceFirst(RegExp(r'^(일출|일몰)까지 '), '')
+                ),
+            ];
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              decoration: BoxDecoration(color: const Color(0xE61E2026), borderRadius: BorderRadius.circular(16)),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                if (parts.isEmpty) ...[
+                  const Icon(Icons.explore_outlined, size: 16, color: Colors.white70),
+                  const SizedBox(width: 6),
+                  const Text('주변 정보', style: TextStyle(fontSize: 12, color: Colors.white)),
+                ],
+                for (final (i, (icon, color, text)) in parts.indexed) ...[
+                  if (i > 0) const SizedBox(width: 10),
+                  Icon(icon, size: 15, color: color),
+                  const SizedBox(width: 4),
+                  Text(text, style: const TextStyle(fontSize: 12, color: Colors.white)),
+                ],
+              ]),
+            );
           },
         ),
       );

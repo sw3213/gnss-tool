@@ -935,17 +935,26 @@ class MapControl {
 
   // ---- 레이어 켜고 끄기 (레이어 버튼). 끈 목록은 map_layers.json에 저장 ----
 
-  /// 스타일의 레이어 id 끝부분([suffixes])으로 묶음
+  /// 레이어 메뉴의 분류 (안전디딤돌 안전지도처럼 분류 -> 체크)
+  static const layerCategories = ['지도', '대피·안전', '물'];
+
+  /// 스타일의 레이어 id 끝부분([suffixes])으로 묶음. [cat]은 [layerCategories] 중 하나
   static const layerGroups = [
-    (id: 'contour', label: '등고선', icon: Icons.terrain_outlined, suffixes: ['-contour', '-contour-label']),
-    (id: 'bands', label: '고도 색칠', icon: Icons.gradient, suffixes: ['-bands']),
-    (id: 'hillshade', label: '산 그림자 (입체 음영)', icon: Icons.landscape_outlined, suffixes: ['-hillshade']),
-    (id: 'trails', label: '등산로 강조', icon: Icons.hiking, suffixes: ['-trails']),
-    (id: 'pois', label: '장소 아이콘', icon: Icons.place_outlined, suffixes: ['-pois']),
-    (id: 'dong', label: '건물·아파트 이름', icon: Icons.apartment, suffixes: ['-dong', '-complex']),
-    (id: 'shelters', label: '민방위 대피소', icon: Icons.shield_outlined, suffixes: ['shelters-pt', 'shelters-label']),
-    (id: 'exit', label: '지하철 출구 번호', icon: Icons.subway_outlined, suffixes: ['-exit', '-exit-no']),
-    (id: 'water', label: '수원지 번호', icon: Icons.water_drop_outlined, suffixes: ['water-pt', 'water-num']),
+    (id: 'contour', cat: '지도', label: '등고선', icon: Icons.terrain_outlined, suffixes: ['-contour', '-contour-label']),
+    (id: 'bands', cat: '지도', label: '고도 색칠', icon: Icons.gradient, suffixes: ['-bands']),
+    (id: 'hillshade', cat: '지도', label: '산 그림자 (입체 음영)', icon: Icons.landscape_outlined, suffixes: ['-hillshade']),
+    (id: 'trails', cat: '지도', label: '등산로 강조', icon: Icons.hiking, suffixes: ['-trails']),
+    (id: 'pois', cat: '지도', label: '장소 아이콘', icon: Icons.place_outlined, suffixes: ['-pois']),
+    (id: 'dong', cat: '지도', label: '건물·아파트 이름', icon: Icons.apartment, suffixes: ['-dong', '-complex']),
+    (id: 'exit', cat: '지도', label: '지하철 출구 번호', icon: Icons.subway_outlined, suffixes: ['-exit', '-exit-no']),
+    (
+      id: 'shelters',
+      cat: '대피·안전',
+      label: '민방위 대피소',
+      icon: Icons.shield_outlined,
+      suffixes: ['shelters-pt', 'shelters-label']
+    ),
+    (id: 'water', cat: '물', label: '수원지 번호', icon: Icons.water_drop_outlined, suffixes: ['water-pt', 'water-num']),
   ];
 
   final hidden = ValueNotifier<Set<String>>({});
@@ -963,7 +972,7 @@ class MapControl {
 
   static Future<File> _layersFile() async => File('${(await getApplicationSupportDirectory()).path}/map_layers.json');
 
-  void _applyGroup(({String id, String label, IconData icon, List<String> suffixes}) g, bool shown) {
+  void _applyGroup(({String id, String cat, String label, IconData icon, List<String> suffixes}) g, bool shown) {
     for (final id in _layerIds) {
       if (g.suffixes.any(id.endsWith)) _ctl?.setLayerVisibility(id, shown);
     }
