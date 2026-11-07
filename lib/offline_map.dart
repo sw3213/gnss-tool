@@ -51,7 +51,7 @@ String formatBytes(int b) => b >= 1 << 30
     ? '${(b / (1 << 30)).toStringAsFixed(1)} GB'
     : b >= 10 << 20
         ? '${(b / (1 << 20)).toStringAsFixed(0)} MB'
-        : b >= 1 << 20
+        : b >= 1000 * 1024
             ? '${(b / (1 << 20)).toStringAsFixed(1)} MB'
             : '${(b / 1024).ceil()} KB';
 
@@ -1783,6 +1783,7 @@ class MapDownloadPage extends StatefulWidget {
 }
 
 class _MapDownloadPageState extends State<MapDownloadPage> {
+  final _open = <String>{}; // 펼친 분류 ("나라 id/분류")
   final store = MapStore.instance;
   List<MapPack>? _catalog;
   String? _error;
@@ -1966,11 +1967,11 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
           trailing: trailing,
         ),
         if (busy.isNotEmpty) LinearProgressIndicator(value: fraction),
-        // 무엇이 들어 있는지: 분류마다 두 줄씩 (대피·안전 시설은 눌러서 하나씩 받기·지우기)
+        // 무엇이 들어 있는지: 분류를 누르면 펼쳐짐 (대피·안전 시설은 눌러서 하나씩 받기·지우기)
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
           child: LayoutBuilder(builder: (context, box) {
-            final w = (box.maxWidth - 12) / 2;
+            final w = box.maxWidth - 16;
             final groups = <String, List<MapPack>>{};
             for (final p in all) {
               groups.putIfAbsent(partGroup(p), () => []).add(p);
@@ -2013,16 +2014,51 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
               );
             }
 
-            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              for (final e in groups.entries) ...[
-                Padding(
-                  padding: const EdgeInsets.only(top: 8, bottom: 2),
-                  child: Text(e.key == '대피·안전 시설' ? '${e.key}  ·  눌러서 필요한 것만 받기' : e.key,
-                      style: const TextStyle(fontSize: 12, color: Colors.white54, fontWeight: FontWeight.w600)),
+            Widget group(String name, List<MapPack> ps) {
+              final key = '${all.first.id.split('-').first}/$name';
+              final open = _open.contains(key);
+              final got = ps.where((p) => mine(p) != null).length;
+              final old = ps.where((p) => mine(p) != null && !fresh(p)).length;
+              final size = ps.where((p) => mine(p) != null).fold<int>(0, (a, p) => a + p.size);
+              final state = old > 0
+                  ? '새 버전 $old개'
+                  : got == ps.length
+                      ? '모두 받음 · ${formatBytes(size)}'
+                      : got == 0
+                          ? '${ps.length}가지'
+                          : '$got / ${ps.length} 받음 · ${formatBytes(size)}';
+              return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => setState(() => open ? _open.remove(key) : _open.add(key)),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                    child: Row(children: [
+                      Text(name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                      const Spacer(),
+                      Text(state,
+                          style: TextStyle(fontSize: 12, color: old > 0 ? Colors.orangeAccent : Colors.white54)),
+                      const SizedBox(width: 4),
+                      Icon(open ? Icons.expand_less : Icons.expand_more, size: 20, color: Colors.white54),
+                    ]),
+                  ),
                 ),
-                Wrap(spacing: 12, children: [for (final p in e.value) item(p)]),
-              ],
-            ]);
+                if (open) ...[
+                  if (ps.any(isOptionalPart))
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(8, 0, 8, 4),
+                      child:
+                          Text('눌러서 필요한 것만 받기 · 받은 것을 누르면 지우기', style: TextStyle(fontSize: 11, color: Colors.white54)),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+                    child: Column(children: [for (final p in ps) item(p)]),
+                  ),
+                ],
+              ]);
+            }
+
+            return Column(children: [for (final e in groups.entries) group(e.key, e.value)]);
           }),
         ),
       ]),
