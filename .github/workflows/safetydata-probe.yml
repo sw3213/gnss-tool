@@ -28,11 +28,19 @@ jobs:
             curl -sS -m 60 "https://www.safetydata.go.kr/V2/api/$id?serviceKey=$key&returnType=json&pageNo=1&numOfRows=2" -o out.txt -w 'HTTP %{http_code}\n' || true
             head -c 3000 out.txt; echo
           }
-          probe quake DSSP-IF-10943 "$K_QUAKE"
-          probe tsunami DSSP-IF-10944 "$K_TSUNAMI"
-          probe chemical DSSP-IF-00707 "$K_CHEMICAL"
-          probe cold DSSP-IF-10804 "$K_COLD"
-          probe heat DSSP-IF-10942 "$K_HEAT"
-          probe quake_housing DSSP-IF-20661 "$K_QUAKE_HOUSING"
-          probe housing DSSP-IF-10945 "$K_HOUSING"
-          probe water DSSP-IF-00098 "$K_WATER"
+          probe2() {
+            name=$1; id=$2; key=$3
+            for q in "returnType=json&pageNo=1&numOfRows=2" "pageNo=1&numOfRows=2" "returnType=json"; do
+              echo "=================== $name ($id) $q"
+              rm -f out.txt
+              curl -sS -m 180 "https://www.safetydata.go.kr/V2/api/$id?serviceKey=$key&$q" -o out.txt -w 'HTTP %{http_code} %{time_total}s\n' || true
+              [ -f out.txt ] && head -c 2500 out.txt; echo
+            done
+          }
+          probe2 quake_housing DSSP-IF-20661 "$K_QUAKE_HOUSING"
+          probe2 housing DSSP-IF-10945 "$K_HOUSING"
+          # 무더위쉼터 뒤쪽 쪽: 1000줄씩 받을 때 겹치는지
+          for pg in 1 63; do
+            curl -sS -m 120 "https://www.safetydata.go.kr/V2/api/DSSP-IF-10942?serviceKey=$K_HEAT&returnType=json&pageNo=$pg&numOfRows=1000" -o h$pg.txt || true
+            python3 -c "import json,sys;d=json.load(open('h$pg.txt'));b=d['body'];print('heat page',$pg,len(b),d['totalCount'],b[0]['RSTR_FCLTY_NO'] if b else None)" || head -c 500 h$pg.txt
+          done
