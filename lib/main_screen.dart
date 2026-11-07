@@ -842,8 +842,11 @@ class _MainScreenState extends State<MainScreen> {
     return c == null ? null : Color(c.color);
   }
 
+  /// 지도 레이어: 위에 분류 이름, 가운데 체크 목록, 아래 분류 탭 (안전디딤돌 안전지도처럼).
+  /// 켜고 끈 것은 저장되어 앱을 다시 켜도 그대로
   void _showLayers() {
     var cat = MapControl.layerCategories.first;
+    const blue = Color(0xFF4C8DFF);
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -851,30 +854,84 @@ class _MainScreenState extends State<MainScreen> {
         child: StatefulBuilder(
           builder: (ctx, setSheet) => ValueListenableBuilder<Set<String>>(
             valueListenable: widget.map.hidden,
-            builder: (_, hidden, __) => Column(mainAxisSize: MainAxisSize.min, children: [
-              const ListTile(title: Text('지도 레이어', style: TextStyle(fontWeight: FontWeight.bold))),
-              // 분류 고르기 (안전디딤돌 안전지도처럼)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Row(children: [
+            builder: (_, hidden, __) {
+              final loaded = widget.map.facilityCatsLoaded.value;
+              final groups = MapControl.layerGroups.where((g) => g.cat == cat).toList();
+              return Column(mainAxisSize: MainAxisSize.min, children: [
+                // 위: 분류 이름 + 닫기
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 8, 4),
+                  child: Row(children: [
+                    Text(cat, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: blue)),
+                    const Spacer(),
+                    IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx)),
+                  ]),
+                ),
+                const Divider(height: 1),
+                // 가운데: 체크 목록 (길면 스크롤)
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.45),
+                  child: ListView(shrinkWrap: true, padding: const EdgeInsets.symmetric(vertical: 6), children: [
+                    for (final g in groups)
+                      () {
+                        final fac = g.id == 'shelters' || g.id.startsWith('fac-');
+                        final facCat = g.id == 'shelters' ? 'shelter' : g.id.substring(4);
+                        final have = !fac || loaded.contains(facCat);
+                        return ListTile(
+                          dense: true,
+                          contentPadding: const EdgeInsets.only(left: 8, right: 16),
+                          leading: Checkbox(
+                            value: have && !hidden.contains(g.id),
+                            onChanged: have ? (on) => widget.map.setLayerShown(g.id, on ?? false) : null,
+                          ),
+                          title: Text(g.label, style: TextStyle(fontSize: 16, color: have ? null : Colors.white38)),
+                          subtitle: have ? null : const Text('지도 다운로드에서 받으면 켤 수 있어요', style: TextStyle(fontSize: 11)),
+                          trailing: Icon(g.icon, size: 22, color: have ? _groupColor(g.id) : Colors.white24),
+                          onTap: have
+                              ? () => widget.map.setLayerShown(g.id, hidden.contains(g.id))
+                              : () {
+                                  Navigator.pop(ctx);
+                                  Navigator.of(context)
+                                      .push(MaterialPageRoute<void>(builder: (_) => const MapDownloadPage()));
+                                },
+                        );
+                      }(),
+                  ]),
+                ),
+                const Divider(height: 1),
+                // 아래: 분류 탭
+                Row(children: [
                   for (final c in MapControl.layerCategories)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ChoiceChip(label: Text(c), selected: c == cat, onSelected: (_) => setSheet(() => cat = c)),
+                    Expanded(
+                      child: InkWell(
+                        onTap: () => setSheet(() => cat = c),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          child: Column(children: [
+                            Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: c == cat ? blue.withValues(alpha: 0.25) : Colors.transparent,
+                              ),
+                              child: Icon(MapControl.layerCategoryIcons[c], color: c == cat ? blue : Colors.white70),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(c,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: c == cat ? FontWeight.bold : FontWeight.normal,
+                                  color: c == cat ? blue : Colors.white70,
+                                  decoration: c == cat ? TextDecoration.underline : null,
+                                  decorationColor: blue,
+                                )),
+                          ]),
+                        ),
+                      ),
                     ),
                 ]),
-              ),
-              for (final g in MapControl.layerGroups.where((g) =>
-                  g.cat == cat &&
-                  (!g.id.startsWith('fac-') || widget.map.facilityCatsLoaded.value.contains(g.id.substring(4)))))
-                CheckboxListTile(
-                  secondary: Icon(g.icon, color: _groupColor(g.id)),
-                  title: Text(g.label),
-                  value: !hidden.contains(g.id),
-                  onChanged: (on) => widget.map.setLayerShown(g.id, on ?? false),
-                ),
-              const SizedBox(height: 8),
-            ]),
+              ]);
+            },
           ),
         ),
       ),

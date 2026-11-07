@@ -1220,7 +1220,14 @@ class MapControl {
   // ---- 레이어 켜고 끄기 (레이어 버튼). 끈 목록은 map_layers.json에 저장 ----
 
   /// 레이어 메뉴의 분류 (안전디딤돌 안전지도처럼 분류 -> 체크)
-  static const layerCategories = ['지도', '대피·안전', '물'];
+  static const layerCategories = ['대피시설', '지도', '물'];
+
+  /// 분류 아이콘 (레이어 메뉴 아래 탭)
+  static const layerCategoryIcons = {
+    '대피시설': Icons.shield_outlined,
+    '지도': Icons.map_outlined,
+    '물': Icons.water_drop_outlined
+  };
 
   /// 스타일의 레이어 id 끝부분([suffixes])으로 묶음. [cat]은 [layerCategories] 중 하나
   static final layerGroups = <({String id, String cat, String label, IconData icon, List<String> suffixes})>[
@@ -1235,7 +1242,7 @@ class MapControl {
     for (final c in facilityCats)
       (
         id: facilityGroupId(c.id),
-        cat: '대피·안전',
+        cat: '대피시설',
         label: c.label,
         icon: facilityIcon(c.id),
         suffixes: [facilityLayerId(c.id, 'pt'), facilityLayerId(c.id, 'label')]
@@ -1248,16 +1255,29 @@ class MapControl {
   /// 받아 둔 시설 종류 (레이어 메뉴에는 받은 것만 보임)
   final facilityCatsLoaded = ValueNotifier<Set<String>>({});
 
-  final hidden = ValueNotifier<Set<String>>({});
+  /// 끈 레이어 묶음. 처음에는 민방위 대피소만 켜고 다른 시설은 꺼 둠 (안전디딤돌처럼 골라서 켬).
+  /// '#v2'는 이 기본값을 이미 적용했다는 표시
+  final hidden = ValueNotifier<Set<String>>(_defaultHidden());
   List<String> _layerIds = []; // 지금 스타일의 레이어 id (MapPage가 채움)
+
+  static Set<String> _defaultHidden() => {
+        '#v2',
+        for (final c in facilityCats)
+          if (c.id != 'shelter') facilityGroupId(c.id)
+      };
 
   MapControl() {
     _layersFile().then((f) {
-      if (!f.existsSync()) return;
-      try {
-        hidden.value = {for (final v in jsonDecode(f.readAsStringSync()) as List) v as String};
-        if (_ready) _styleLoaded();
-      } catch (_) {}
+      var saved = <String>{};
+      if (f.existsSync()) {
+        try {
+          saved = {for (final v in jsonDecode(f.readAsStringSync()) as List) v as String};
+        } catch (_) {}
+      }
+      // 예전 저장 파일(시설을 켜고 끄기 전)에는 기본값을 더함. 그 뒤로는 사용자가 고른 그대로
+      hidden.value = saved.contains('#v2') ? saved : {...saved, ..._defaultHidden()};
+      if (!saved.contains('#v2')) f.writeAsStringSync(jsonEncode(hidden.value.toList()));
+      if (_ready) _styleLoaded();
     }).catchError((Object _) {});
   }
 
