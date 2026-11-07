@@ -840,27 +840,29 @@ List<Map<String, Object>> _facilityLayers() => [
       for (final c in facilityCats) ...[
         {
           'id': facilityLayerId(c.id, 'pt'),
-          'type': 'circle',
+          'type': 'symbol',
           'source': 'shelters',
-          'minzoom': 14,
+          'minzoom': 13,
           'filter': [
             '==',
             ['get', 'cat'],
             c.id
           ],
-          'paint': {
-            'circle-radius': [
+          'layout': {
+            'icon-image': 'fac-icon-${c.id}',
+            'icon-size': [
               'interpolate',
               ['linear'],
               ['zoom'],
-              14,
-              4,
-              17,
-              7
+              13,
+              0.32,
+              16,
+              0.5,
+              18,
+              0.6
             ],
-            'circle-color': _hex(c.color),
-            'circle-stroke-color': '#ffffff',
-            'circle-stroke-width': 1.5,
+            'icon-allow-overlap': true,
+            'icon-ignore-placement': true,
           },
         },
         {
@@ -878,7 +880,7 @@ List<Map<String, Object>> _facilityLayers() => [
             'text-font': ['NotoSansMedium'],
             'text-size': 11,
             'text-anchor': 'top',
-            'text-offset': [0, 0.7],
+            'text-offset': [0, 1.3],
             'text-max-width': 9,
           },
           'paint': {'text-color': _hex(c.color), 'text-halo-color': '#ffffff', 'text-halo-width': 1.5},
@@ -1189,6 +1191,10 @@ class MapControl {
       _arrowReady = true;
       _showArrow();
     }).catchError((Object _) {});
+    // 시설 아이콘 (종류마다 색 동그라미 + 흰 그림)
+    for (final c in facilityCats) {
+      _facilityIconPng(c.id, c.color).then((b) => _ctl?.addImage('fac-icon-${c.id}', b)).catchError((Object _) {});
+    }
     _drawMe();
     if (tilted.value) _show3dBuildings();
     _ctl?.setGeoJsonSource('track', _track);
@@ -1411,6 +1417,29 @@ class MapControl {
               ..strokeWidth = 7
               ..strokeJoin = StrokeJoin.round);
         canvas.drawPath(arrow, Paint()..color = const Color(0xFF3B6CF6));
+        final img = await rec.endRecording().toImage(s.toInt(), s.toInt());
+        return (await img.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      }();
+
+  static final _facilityPngs = <String, Future<Uint8List>>{};
+
+  /// 시설 지도 아이콘: 흰 테두리 색 동그라미 안에 레이어 메뉴와 같은 그림 (크게 그려 지도에서 줄여 씀)
+  static Future<Uint8List> _facilityIconPng(String cat, int color) => _facilityPngs[cat] ??= () async {
+        const s = 72.0, r = s / 2;
+        final rec = ui.PictureRecorder();
+        final canvas = Canvas(rec);
+        canvas.drawCircle(const Offset(r, r + 1.5), r - 4, Paint()..color = Colors.black38); // 그림자
+        canvas.drawCircle(const Offset(r, r), r - 3, Paint()..color = Colors.white);
+        canvas.drawCircle(const Offset(r, r), r - 8, Paint()..color = Color(color));
+        final icon = facilityIcon(cat);
+        final tp = TextPainter(
+          text: TextSpan(
+            text: String.fromCharCode(icon.codePoint),
+            style: TextStyle(fontFamily: icon.fontFamily, package: icon.fontPackage, fontSize: 38, color: Colors.white),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        tp.paint(canvas, Offset(r - tp.width / 2, r - tp.height / 2));
         final img = await rec.endRecording().toImage(s.toInt(), s.toInt());
         return (await img.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
       }();

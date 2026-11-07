@@ -835,6 +835,13 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   /// 레이어 켜고 끄기 (등고선, 고도 색칠, 등산로…). 선택은 저장되어 다음에도 유지
+  /// 레이어 메뉴 아이콘 색: 대피·안전 시설은 지도 아이콘과 같은 색
+  Color? _groupColor(String id) {
+    final cat = id == 'shelters' ? 'shelter' : (id.startsWith('fac-') ? id.substring(4) : null);
+    final c = facilityCats.where((c) => c.id == cat).firstOrNull;
+    return c == null ? null : Color(c.color);
+  }
+
   void _showLayers() {
     var cat = MapControl.layerCategories.first;
     showModalBottomSheet<void>(
@@ -861,7 +868,7 @@ class _MainScreenState extends State<MainScreen> {
                   g.cat == cat &&
                   (!g.id.startsWith('fac-') || widget.map.facilityCatsLoaded.value.contains(g.id.substring(4)))))
                 CheckboxListTile(
-                  secondary: Icon(g.icon),
+                  secondary: Icon(g.icon, color: _groupColor(g.id)),
                   title: Text(g.label),
                   value: !hidden.contains(g.id),
                   onChanged: (on) => widget.map.setLayerShown(g.id, on ?? false),
