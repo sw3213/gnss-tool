@@ -47,8 +47,13 @@ class MapPack {
   LatLng get center => LatLng((bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2);
 }
 
-String formatBytes(int b) =>
-    b >= 1 << 30 ? '${(b / (1 << 30)).toStringAsFixed(1)} GB' : '${(b / (1 << 20)).toStringAsFixed(0)} MB';
+String formatBytes(int b) => b >= 1 << 30
+    ? '${(b / (1 << 30)).toStringAsFixed(1)} GB'
+    : b >= 10 << 20
+        ? '${(b / (1 << 20)).toStringAsFixed(0)} MB'
+        : b >= 1 << 20
+            ? '${(b / (1 << 20)).toStringAsFixed(1)} MB'
+            : '${(b / 1024).ceil()} KB';
 
 /// 내려받은 지도 목록. 정보는 앱 내부 저장소 maps/<id>.json, 지도 파일 경로는 그 안의 'path'
 /// (다운로드 관리자는 앱 전용 외부 저장소에 받음. 예전 방식으로 받은 지도는 내부 maps/<id>.pmtiles)
@@ -1877,10 +1882,15 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
   }
 
   /// 나라 하나 = 카드 하나. 지도·지형·건물 이름·분석 데이터를 한 번에 받고, 진행률도 합쳐서 보여 줌
-  Widget _bundle(List<MapPack> parts, List<MapPack> installed, Map<String, DlState> progress) {
-    final title = bundleTitle(parts);
-    final total = parts.fold<int>(0, (a, p) => a + p.size);
+  Widget _bundle(List<MapPack> all, List<MapPack> installed, Map<String, DlState> progress) {
+    final title = bundleTitle(all);
     MapPack? mine(MapPack p) => installed.where((x) => x.id == p.id).firstOrNull;
+    // 대피·안전 시설은 골라서 받음: 받은 것만 묶음(전체 받기·업데이트·크기)에 셈
+    final parts = [
+      for (final p in all)
+        if (!isOptionalPart(p) || mine(p) != null || progress.containsKey(p.id)) p
+    ];
+    final total = parts.fold<int>(0, (a, p) => a + p.size);
     // 같은 날 다시 만든 파일은 날짜가 같으므로 크기도 비교
     bool fresh(MapPack p) => mine(p) != null && mine(p)!.date.compareTo(p.date) >= 0 && mine(p)!.size == p.size;
     final busy = [
@@ -1896,7 +1906,7 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
         if (store.failures.value[p.id] != null) store.failures.value[p.id]!
     ];
     final have = parts.where((p) => mine(p) != null).toList();
-    final newest = parts.map((p) => p.date).reduce((a, b) => a.compareTo(b) >= 0 ? a : b);
+    final newest = all.map((p) => p.date).reduce((a, b) => a.compareTo(b) >= 0 ? a : b);
 
     final String sub;
     final Widget trailing;
@@ -1956,27 +1966,82 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
           trailing: trailing,
         ),
         if (busy.isNotEmpty) LinearProgressIndicator(value: fraction),
-        // 무엇이 들어 있는지 (작게)
+        // 무엇이 들어 있는지: 분류마다 두 줄씩 (대피·안전 시설은 눌러서 하나씩 받기·지우기)
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-          child: Wrap(spacing: 6, runSpacing: 6, children: [
-            for (final p in parts)
-              Chip(
-                visualDensity: VisualDensity.compact,
-                avatar: Icon(
-                  fresh(p)
-                      ? Icons.check
-                      : progress.containsKey(p.id)
-                          ? Icons.downloading
-                          : Icons.cloud_outlined,
-                  size: 16,
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: LayoutBuilder(builder: (context, box) {
+            final w = (box.maxWidth - 12) / 2;
+            final groups = <String, List<MapPack>>{};
+            for (final p in all) {
+              groups.putIfAbsent(partGroup(p), () => []).add(p);
+            }
+            Widget item(MapPack p) {
+              final optional = isOptionalPart(p);
+              final busyP = progress.containsKey(p.id);
+              final IconData icon;
+              final Color? color;
+              if (busyP) {
+                (icon, color) = (Icons.downloading, null);
+              } else if (fresh(p)) {
+                (icon, color) = (Icons.check_circle, Colors.lightGreenAccent);
+              } else if (mine(p) != null) {
+                (icon, color) = (Icons.update, Colors.orangeAccent);
+              } else {
+                (icon, color) = (optional ? Icons.add_circle_outline : Icons.cloud_outlined, Colors.white54);
+              }
+              final row = SizedBox(
+                width: w,
+                height: 32,
+                child: Row(children: [
+                  Icon(icon, size: 16, color: color),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(partLabel(p),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 13, color: mine(p) == null && optional ? Colors.white70 : null)),
+                  ),
+                  Text(formatBytes(p.size), style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                ]),
+              );
+              if (!optional || busyP) return row;
+              return InkWell(
+                borderRadius: BorderRadius.circular(6),
+                onTap: () =>
+                    mine(p) == null || !fresh(p) ? _downloadAll(partLabel(p), [p]) : _deleteOne(partLabel(p), p),
+                child: row,
+              );
+            }
+
+            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              for (final e in groups.entries) ...[
+                Padding(
+                  padding: const EdgeInsets.only(top: 8, bottom: 2),
+                  child: Text(e.key == '대피·안전 시설' ? '${e.key}  ·  눌러서 필요한 것만 받기' : e.key,
+                      style: const TextStyle(fontSize: 12, color: Colors.white54, fontWeight: FontWeight.w600)),
                 ),
-                label: Text('${partLabel(p)} ${formatBytes(p.size)}', style: const TextStyle(fontSize: 12)),
-              ),
-          ]),
+                Wrap(spacing: 12, children: [for (final p in e.value) item(p)]),
+              ],
+            ]);
+          }),
         ),
       ]),
     );
+  }
+
+  Future<void> _deleteOne(String label, MapPack p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('$label 자료를 지울까요?'),
+        content: const Text('지도에서 이 시설 점이 사라집니다. 다시 받을 수 있습니다.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('삭제')),
+        ],
+      ),
+    );
+    if (ok == true) await store.delete(p.id);
   }
 
   Future<void> _deleteAll(String title, List<MapPack> parts) async {
@@ -2072,6 +2137,16 @@ String? kindLabel(String? kind) => switch (kind) {
       'cinema' => '영화관',
       'sports_centre' || 'stadium' || 'pitch' => '체육시설',
       _ => null,
+    };
+
+/// 골라서 받는 항목 (대피·안전 시설): 묶음 전체 받기에 들어가지 않음
+bool isOptionalPart(MapPack p) => p.kind == 'facility';
+
+/// 받기 화면의 분류
+String partGroup(MapPack p) => switch (p.kind) {
+      'routes' || 'drive' || 'address' => '길찾기·검색',
+      'shelters' || 'facility' => '대피·안전 시설',
+      _ => '지도',
     };
 
 String partLabel(MapPack p) => switch (p.kind) {
