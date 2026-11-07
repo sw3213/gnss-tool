@@ -1,0 +1,38 @@
+name: Probe safetydata (temporary)
+
+# 재난안전데이터공유플랫폼 자료 8개가 어떻게 생겼는지 몇 줄씩만 받아 봄 (임시, 확인 뒤 지움)
+on:
+  push:
+    branches: [main-yievoq]
+    paths: ['.github/workflows/safetydata-probe.yml']
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Probe
+        env:
+          K_QUAKE: ${{ secrets.SD_KEY_QUAKE }}
+          K_TSUNAMI: ${{ secrets.SD_KEY_TSUNAMI }}
+          K_CHEMICAL: ${{ secrets.SD_KEY_CHEMICAL }}
+          K_COLD: ${{ secrets.SD_KEY_COLD }}
+          K_HEAT: ${{ secrets.SD_KEY_HEAT }}
+          K_QUAKE_HOUSING: ${{ secrets.SD_KEY_QUAKE_HOUSING }}
+          K_HOUSING: ${{ secrets.SD_KEY_HOUSING }}
+          K_WATER: ${{ secrets.SD_KEY_WATER }}
+        run: |
+          probe() {
+            name=$1; id=$2; key=$3
+            echo "=================== $name ($id) key length ${#key}"
+            curl -sS -m 60 "https://www.safetydata.go.kr/V2/api/$id?serviceKey=$key&returnType=json&pageNo=1&numOfRows=2" -o out.txt -w 'HTTP %{http_code}\n' || true
+            head -c 3000 out.txt; echo
+          }
+          probe quake DSSP-IF-10943 "$K_QUAKE"
+          probe tsunami DSSP-IF-10944 "$K_TSUNAMI"
+          probe chemical DSSP-IF-00707 "$K_CHEMICAL"
+          probe cold DSSP-IF-10804 "$K_COLD"
+          probe heat DSSP-IF-10942 "$K_HEAT"
+          probe quake_housing DSSP-IF-20661 "$K_QUAKE_HOUSING"
+          probe housing DSSP-IF-10945 "$K_HOUSING"
+          probe water DSSP-IF-00098 "$K_WATER"
