@@ -643,10 +643,11 @@ class _MainScreenState extends State<MainScreen> {
               builder: (_, p) {
                 final pl = name == null ? p.data : null;
                 final k = kind ?? pl?.detail;
-                return Text.rich(TextSpan(children: [
-                  TextSpan(text: name ?? pl?.title ?? '선택한 곳'),
-                  if (k != null) TextSpan(text: '  $k', style: const TextStyle(fontSize: 13, color: Colors.white60)),
-                ]));
+                // 종류(민방위 대피소 · 지하 …)는 이름 아래 따로 한 줄: 이름 뒤에 붙이면 중간에서 끊겨 보임
+                return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(name ?? pl?.title ?? '선택한 곳'),
+                  if (k != null) Text(k, style: const TextStyle(fontSize: 13, color: Colors.white60)),
+                ]);
               },
             ),
             subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
