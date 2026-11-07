@@ -1783,7 +1783,6 @@ class MapDownloadPage extends StatefulWidget {
 }
 
 class _MapDownloadPageState extends State<MapDownloadPage> {
-  final _open = <String>{}; // 펼친 분류 ("나라 id/분류")
   final store = MapStore.instance;
   List<MapPack>? _catalog;
   String? _error;
@@ -1967,101 +1966,76 @@ class _MapDownloadPageState extends State<MapDownloadPage> {
           trailing: trailing,
         ),
         if (busy.isNotEmpty) LinearProgressIndicator(value: fraction),
-        // 무엇이 들어 있는지: 분류를 누르면 펼쳐짐 (대피·안전 시설은 눌러서 하나씩 받기·지우기)
+        // 들어 있는 것: 지도·길찾기는 한 줄로 작게, 대피·안전 시설은 레이어처럼 켜고 끄기 (켜면 받고 끄면 지움)
         Padding(
-          padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-          child: LayoutBuilder(builder: (context, box) {
-            final w = box.maxWidth - 16;
-            final groups = <String, List<MapPack>>{};
-            for (final p in all) {
-              groups.putIfAbsent(partGroup(p), () => []).add(p);
-            }
-            Widget item(MapPack p) {
-              final optional = isOptionalPart(p);
-              final busyP = progress.containsKey(p.id);
-              final IconData icon;
-              final Color? color;
-              if (busyP) {
-                (icon, color) = (Icons.downloading, null);
-              } else if (fresh(p)) {
-                (icon, color) = (Icons.check_circle, Colors.lightGreenAccent);
-              } else if (mine(p) != null) {
-                (icon, color) = (Icons.update, Colors.orangeAccent);
-              } else {
-                (icon, color) = (optional ? Icons.add_circle_outline : Icons.cloud_outlined, Colors.white54);
-              }
-              final row = SizedBox(
-                width: w,
-                height: 32,
-                child: Row(children: [
-                  Icon(icon, size: 16, color: color),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(partLabel(p),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 13, color: mine(p) == null && optional ? Colors.white70 : null)),
-                  ),
-                  Text(formatBytes(p.size), style: const TextStyle(fontSize: 11, color: Colors.white54)),
-                ]),
-              );
-              if (!optional || busyP) return row;
-              return InkWell(
-                borderRadius: BorderRadius.circular(6),
-                onTap: () =>
-                    mine(p) == null || !fresh(p) ? _downloadAll(partLabel(p), [p]) : _deleteOne(partLabel(p), p),
-                child: row,
-              );
-            }
-
-            Widget group(String name, List<MapPack> ps) {
-              final key = '${all.first.id.split('-').first}/$name';
-              final open = _open.contains(key);
-              final got = ps.where((p) => mine(p) != null).length;
-              final old = ps.where((p) => mine(p) != null && !fresh(p)).length;
-              final size = ps.where((p) => mine(p) != null).fold<int>(0, (a, p) => a + p.size);
-              final state = old > 0
-                  ? '새 버전 $old개'
-                  : got == ps.length
-                      ? '모두 받음 · ${formatBytes(size)}'
-                      : got == 0
-                          ? '${ps.length}가지'
-                          : '$got / ${ps.length} 받음 · ${formatBytes(size)}';
-              return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                InkWell(
-                  borderRadius: BorderRadius.circular(8),
-                  onTap: () => setState(() => open ? _open.remove(key) : _open.add(key)),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-                    child: Row(children: [
-                      Text(name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                      const Spacer(),
-                      Text(state,
-                          style: TextStyle(fontSize: 12, color: old > 0 ? Colors.orangeAccent : Colors.white54)),
-                      const SizedBox(width: 4),
-                      Icon(open ? Icons.expand_less : Icons.expand_more, size: 20, color: Colors.white54),
-                    ]),
-                  ),
-                ),
-                if (open) ...[
-                  if (ps.any(isOptionalPart))
-                    const Padding(
-                      padding: EdgeInsets.fromLTRB(8, 0, 8, 4),
-                      child:
-                          Text('눌러서 필요한 것만 받기 · 받은 것을 누르면 지우기', style: TextStyle(fontSize: 11, color: Colors.white54)),
-                    ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
-                    child: Column(children: [for (final p in ps) item(p)]),
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text.rich(
+              TextSpan(children: [
+                for (final (i, p) in all.where((p) => partGroup(p) != '대피·안전 시설').indexed) ...[
+                  if (i > 0) const TextSpan(text: ' · '),
+                  TextSpan(
+                    text: partLabel(p),
+                    style: TextStyle(
+                        color: progress.containsKey(p.id)
+                            ? Colors.lightBlueAccent
+                            : fresh(p)
+                                ? null
+                                : mine(p) != null
+                                    ? Colors.orangeAccent
+                                    : Colors.white38),
                   ),
                 ],
-              ]);
-            }
-
-            return Column(children: [for (final e in groups.entries) group(e.key, e.value)]);
-          }),
+              ]),
+              style: const TextStyle(fontSize: 12, color: Colors.white60),
+            ),
+          ),
         ),
+        if (all.any((p) => partGroup(p) == '대피·안전 시설')) ...[
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text('대피·안전 시설  ·  켜면 받고, 끄면 지웁니다',
+                  style: TextStyle(fontSize: 12, color: Colors.white54, fontWeight: FontWeight.w600)),
+            ),
+          ),
+          for (final p in all.where((p) => partGroup(p) == '대피·안전 시설'))
+            _facilitySwitch(p, mine(p), progress[p.id], fresh(p)),
+          const SizedBox(height: 8),
+        ] else
+          const SizedBox(height: 8),
       ]),
+    );
+  }
+
+  /// 시설 자료 한 줄: 색 아이콘 · 이름 · 크기 · 스위치 (받는 중이면 진행 표시)
+  Widget _facilitySwitch(MapPack p, MapPack? have, DlState? dl, bool fresh) {
+    final cat = p.kind == 'shelters' ? 'shelter' : p.id.split('-fac-').last;
+    final color = Color(facilityCats.where((c) => c.id == cat).firstOrNull?.color ?? 0xFF868E96);
+    final label = partLabel(p);
+    return ListTile(
+      dense: true,
+      visualDensity: VisualDensity.compact,
+      leading: Icon(facilityIcon(cat), color: color, size: 22),
+      title: Text(label, style: const TextStyle(fontSize: 14)),
+      subtitle: Text(
+        dl != null
+            ? '받는 중 ${dl.fraction == null ? '' : '${(dl.fraction! * 100).floor()}%'}'
+            : have != null && !fresh
+                ? '새 버전 있음 · 눌러서 업데이트 (${formatBytes(p.size)})'
+                : formatBytes(p.size),
+        style:
+            TextStyle(fontSize: 11, color: have != null && !fresh && dl == null ? Colors.orangeAccent : Colors.white54),
+      ),
+      onTap: dl == null && have != null && !fresh ? () => _downloadAll(label, [p]) : null,
+      trailing: dl != null
+          ? SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, value: dl.fraction))
+          : Switch(
+              value: have != null,
+              onChanged: (on) => on ? _downloadAll(label, [p]) : _deleteOne(label, p),
+            ),
     );
   }
 
@@ -2175,8 +2149,8 @@ String? kindLabel(String? kind) => switch (kind) {
       _ => null,
     };
 
-/// 골라서 받는 항목 (대피·안전 시설): 묶음 전체 받기에 들어가지 않음
-bool isOptionalPart(MapPack p) => p.kind == 'facility';
+/// 골라서 받는 항목 (대피·안전 시설, 스위치로 켜고 끔): 묶음 전체 받기에 들어가지 않음
+bool isOptionalPart(MapPack p) => p.kind == 'facility' || p.kind == 'shelters';
 
 /// 받기 화면의 분류
 String partGroup(MapPack p) => switch (p.kind) {
