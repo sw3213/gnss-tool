@@ -1,7 +1,7 @@
 name: Build safety facilities
 
 # 대피·안전 시설(미세먼지쉼터 …)을 종류마다 kr-fac-<종류>.json으로 만들어 Release "maps"에 올림.
-# 인증키는 GitHub Secret (공공데이터포털 DATA_GO_KR_KEY). 앱은 kind="facility"로 지도·가까운 시설에 씀.
+# 인증키는 GitHub Secret (공공데이터포털 DATA_GO_KR_KEY, 재난안전데이터공유플랫폼은 자료마다 SD_KEY_<종류>). 앱은 kind="facility"로 지도·가까운 시설에 씀.
 # 만드는 코드는 maps/build_facilities.py, 앱 쪽은 lib/shelters.dart.
 # 종류를 늘리면 아래 CATS에 더함 (카탈로그를 한 번에 고치려고 한 job에서 차례로)
 
@@ -17,7 +17,7 @@ permissions:
   contents: write
 
 env:
-  CATS: dust
+  CATS: dust quake tsunami chemical housing quake_housing heat cold water
 
 jobs:
   facilities:
@@ -29,10 +29,21 @@ jobs:
       - name: Download facilities
         env:
           DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
+          SD_KEY_QUAKE: ${{ secrets.SD_KEY_QUAKE }}
+          SD_KEY_TSUNAMI: ${{ secrets.SD_KEY_TSUNAMI }}
+          SD_KEY_CHEMICAL: ${{ secrets.SD_KEY_CHEMICAL }}
+          SD_KEY_HOUSING: ${{ secrets.SD_KEY_HOUSING }}
+          SD_KEY_QUAKE_HOUSING: ${{ secrets.SD_KEY_QUAKE_HOUSING }}
+          SD_KEY_HEAT: ${{ secrets.SD_KEY_HEAT }}
+          SD_KEY_COLD: ${{ secrets.SD_KEY_COLD }}
+          SD_KEY_WATER: ${{ secrets.SD_KEY_WATER }}
         run: |
+          # 한 종류가 실패해도 나머지는 올림 (실패한 종류는 지난달 파일이 그대로 남음)
+          failed=''
           for c in $CATS; do
-            python3 maps/build_facilities.py "$c" "kr-fac-$c.json"
+            python3 maps/build_facilities.py "$c" "kr-fac-$c.json" || { failed="$failed $c"; rm -f "kr-fac-$c.json"; }
           done
+          [ -z "$failed" ] || echo "::warning::실패한 종류:$failed"
 
       - name: Publish to release "maps"
         env:
@@ -43,6 +54,7 @@ jobs:
           gh release download maps -p catalog.json -O catalog.json 2>/dev/null || echo '[]' > catalog.json
           for c in $CATS; do
             f="kr-fac-$c.json"
+            [ -f "$f" ] || continue
             label=$(python3 maps/build_facilities.py --label "$c")
             jq --arg id "kr-fac-$c" --arg name "대한민국 $label" \
                --arg url "https://github.com/$REPO/releases/download/maps/$f" \
