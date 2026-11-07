@@ -213,8 +213,12 @@ def water(key):
 
 
 def housing(key):
+    def detail(r):  # 층·방 같은 자세한 위치 (이름을 되풀이한 것은 뺌)
+        d = txt(r.get('RN_DTL_ADRES'))
+        return '' if d == txt(r.get('VT_ACMDFCLTY_NM')) else d
+
     return collect(sd_rows('DSSP-IF-10945', key), lambda r: [
-        txt(r.get('VT_ACMDFCLTY_NM')), txt(r.get('RN_DTL_ADRES')), 0, int(num(r.get('VT_ACMD_PSBL_NMPR')) or 0),
+        txt(r.get('VT_ACMDFCLTY_NM')), detail(r), 0, int(num(r.get('VT_ACMD_PSBL_NMPR')) or 0),
         txt(r.get('DTL_ADRES')), num(r.get('LA')), num(r.get('LO')), ''])
 
 
