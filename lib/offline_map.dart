@@ -880,7 +880,7 @@ List<Map<String, Object>> _facilityLayers() => [
             'text-font': ['NotoSansMedium'],
             'text-size': 11,
             'text-anchor': 'top',
-            'text-offset': [0, 1.3],
+            'text-offset': [0, 0.3],
             'text-max-width': 9,
           },
           'paint': {'text-color': _hex(c.color), 'text-halo-color': '#ffffff', 'text-halo-width': 1.5},
@@ -1200,7 +1200,8 @@ class MapControl {
     _ctl?.setGeoJsonSource('track', _track);
     _ctl?.setGeoJsonSource('wpts', _wpts);
     _ctl?.setGeoJsonSource('water', _water);
-    _ctl?.setGeoJsonSource('shelters', _shelters);
+    _facKey = null;
+    _drawFacilities();
     _drawTarget();
     _ctl?.setGeoJsonSource('route', _route);
     _drawPick();
@@ -1271,31 +1272,87 @@ class MapControl {
   Future<void> setLayerShown(String group, bool shown) async {
     hidden.value = shown ? ({...hidden.value}..remove(group)) : {...hidden.value, group};
     if (_ready) _applyGroup(layerGroups.firstWhere((g) => g.id == group), shown);
+    _drawFacilities();
     (await _layersFile()).writeAsStringSync(jsonEncode(hidden.value.toList()));
   }
 
-  /// 가까운 수원지를 1~5 번호 붙은 점으로 (기본 파랑, 긴급 주황)
+  // ---- 대피·안전 시설 핀 ----
+  // 전국 시설은 20만 곳 가까이 되어 한 번에 지도에 넘기면 멈춤 -> 보이는 곳 둘레만 넘김 (지도를 멈출 때마다)
   Map<String, dynamic> _shelters = _emptyFc;
+  List<({double lat, double lon, String name, String cat})> _facAll = const [];
+  final _facCells = <int, List<int>>{}; // 0.05° 칸마다 시설 번호
+  String? _facKey; // 마지막으로 넘긴 범위 (같으면 다시 안 넘김)
+  static const _facMinZoom = 12.5;
 
   /// 대피·안전 시설 전부 (자료를 받았을 때 한 번). [cat]은 facilityCats의 id
   void setShelters(List<({double lat, double lon, String name, String cat})> pts) {
     facilityCatsLoaded.value = {for (final p in pts) p.cat};
+    _facAll = pts;
+    _facCells.clear();
+    for (var i = 0; i < pts.length; i++) {
+      _facCells.putIfAbsent(_facCell((pts[i].lat * 20).floor(), (pts[i].lon * 20).floor()), () => []).add(i);
+    }
+    _facKey = null;
+    _drawFacilities();
+  }
+
+  static int _facCell(int y, int x) => y * 10000 + x;
+
+  /// 지금 보이는 곳 둘레(화면 약 2.5배)의 시설만 지도에 넘김. 멀리서 볼 때는 안 그림
+  void _drawFacilities() {
+    if (!_ready) return;
+    final cam = camera.value;
+    final off = hidden.value;
+    final cats = {
+      for (final c in facilityCats)
+        if (!off.contains(facilityGroupId(c.id))) c.id
+    };
+    String key;
+    List<int> pick = const [];
+    if (cam == null || cam.zoom < _facMinZoom || _facAll.isEmpty) {
+      key = 'none';
+    } else {
+      final lat = cam.target.latitude, lon = cam.target.longitude;
+      final mpp = 156543.03 * math.cos(lat * math.pi / 180) / math.pow(2, cam.zoom);
+      final halfM = 1200 * mpp;
+      final dLat = halfM / 111320, dLon = halfM / (111320 * math.cos(lat * math.pi / 180));
+      final y0 = ((lat - dLat) * 20).floor(), y1 = ((lat + dLat) * 20).floor();
+      final x0 = ((lon - dLon) * 20).floor(), x1 = ((lon + dLon) * 20).floor();
+      key = '$y0,$y1,$x0,$x1,${cats.join(',')}';
+      if (key == _facKey) return;
+      pick = [
+        for (var y = y0; y <= y1; y++)
+          for (var x = x0; x <= x1; x++)
+            for (final i in _facCells[_facCell(y, x)] ?? const <int>[])
+              if (cats.contains(_facAll[i].cat)) i
+      ];
+      if (pick.length > 6000) pick = pick.sublist(0, 6000);
+    }
+    if (key == _facKey) return;
+    _facKey = key;
     _shelters = {
       'type': 'FeatureCollection',
       'features': [
-        for (final p in pts)
+        for (final i in pick)
           {
             'type': 'Feature',
             'geometry': {
               'type': 'Point',
-              'coordinates': [p.lon, p.lat]
+              'coordinates': [_facAll[i].lon, _facAll[i].lat]
             },
-            'properties': {'name': p.name, 'kind': p.cat == 'shelter' ? 'civil_shelter' : 'fac_${p.cat}', 'cat': p.cat},
+            'properties': {
+              'name': _facAll[i].name,
+              'kind': _facAll[i].cat == 'shelter' ? 'civil_shelter' : 'fac_${_facAll[i].cat}',
+              'cat': _facAll[i].cat,
+            },
           }
       ],
     };
-    if (_ready) _ctl?.setGeoJsonSource('shelters', _shelters);
+    _ctl?.setGeoJsonSource('shelters', _shelters);
   }
+
+  /// 지도가 멈췄을 때 (MapPage가 부름)
+  void _cameraIdle() => _drawFacilities();
 
   void setWater(List<({double lat, double lon, bool emergency})> pts) {
     _water = {
@@ -1423,24 +1480,29 @@ class MapControl {
 
   static final _facilityPngs = <String, Future<Uint8List>>{};
 
-  /// 시설 지도 아이콘: 흰 테두리 색 동그라미 안에 레이어 메뉴와 같은 그림 (크게 그려 지도에서 줄여 씀)
+  /// 시설 지도 핀: 아래가 뾰족한 물방울 모양(흰 테두리, 종류 색) 안에 레이어 메뉴와 같은 흰 그림. 크게 그려 지도에서 줄여 씀
   static Future<Uint8List> _facilityIconPng(String cat, int color) => _facilityPngs[cat] ??= () async {
-        const s = 72.0, r = s / 2;
+        const w = 76.0, h = 96.0, cx = w / 2, cy = 36.0, r = 33.0;
         final rec = ui.PictureRecorder();
         final canvas = Canvas(rec);
-        canvas.drawCircle(const Offset(r, r + 1.5), r - 4, Paint()..color = Colors.black38); // 그림자
-        canvas.drawCircle(const Offset(r, r), r - 3, Paint()..color = Colors.white);
-        canvas.drawCircle(const Offset(r, r), r - 8, Paint()..color = Color(color));
+        Path pin(double rr, double tip) => Path()
+          ..moveTo(cx, tip)
+          ..lineTo(cx - rr * 0.62, cy + rr * 0.78)
+          ..arcToPoint(Offset(cx + rr * 0.62, cy + rr * 0.78), radius: Radius.circular(rr), largeArc: true)
+          ..close();
+        canvas.drawPath(pin(r, h - 2).shift(const Offset(0, 2)), Paint()..color = Colors.black26); // 그림자
+        canvas.drawPath(pin(r, h - 4), Paint()..color = Colors.white);
+        canvas.drawPath(pin(r - 5, h - 12), Paint()..color = Color(color));
         final icon = facilityIcon(cat);
         final tp = TextPainter(
           text: TextSpan(
             text: String.fromCharCode(icon.codePoint),
-            style: TextStyle(fontFamily: icon.fontFamily, package: icon.fontPackage, fontSize: 38, color: Colors.white),
+            style: TextStyle(fontFamily: icon.fontFamily, package: icon.fontPackage, fontSize: 36, color: Colors.white),
           ),
           textDirection: TextDirection.ltr,
         )..layout();
-        tp.paint(canvas, Offset(r - tp.width / 2, r - tp.height / 2));
-        final img = await rec.endRecording().toImage(s.toInt(), s.toInt());
+        tp.paint(canvas, Offset(cx - tp.width / 2, cy - tp.height / 2));
+        final img = await rec.endRecording().toImage(w.toInt(), h.toInt());
         return (await img.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
       }();
 
@@ -1676,6 +1738,7 @@ class _MapPageState extends State<MapPage> {
               onCameraIdle: () {
                 final cam = ctl._ctl?.cameraPosition;
                 if (cam != null) _lastCamera = ctl.camera.value = cam;
+                ctl._cameraIdle();
               },
               onCameraTrackingDismissed: () => ctl.follow.value = false,
               onMapLongClick: (_, ll) => ctl.onLongPress?.call(ll.latitude, ll.longitude),
