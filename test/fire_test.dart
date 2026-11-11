@@ -20,13 +20,15 @@ void main() {
     expect(areaDistanceM(holed, 37.005, 127.005), greaterThan(80));
   });
 
-  test('fire status wording and the 100 m rule', () {
+  test('fire status wording: law 100 m, app keeps 150 m', () {
     expect(const FireStatus(forestM: 0).banned, isTrue);
     expect(const FireStatus(forestM: 0).summary, '숲 안: 불 피우기 금지 (산림보호법)');
     expect(const FireStatus(forestM: 40).banned, isTrue);
     expect(const FireStatus(forestM: 40).summary, contains('100 m 안'));
-    expect(const FireStatus(forestM: 150).banned, isFalse);
-    expect(const FireStatus(forestM: 150).chip, '불 가능');
+    expect(const FireStatus(forestM: 120).banned, isTrue); // 법 기준은 넘지만 여유 안
+    expect(const FireStatus(forestM: 120).summary, contains('150 m 안은 피하세요'));
+    expect(const FireStatus(forestM: 160).banned, isFalse);
+    expect(const FireStatus(forestM: 160).chip, '불 가능');
     expect(const FireStatus().banned, isFalse); // 주변에 숲 없음
     expect(const FireStatus(forestM: 500, inPark: true, parkName: '북한산국립공원').summary, startsWith('북한산국립공원 안'));
     expect(const FireStatus(forestM: 500, inPark: true).chip, '불 금지');
@@ -34,7 +36,7 @@ void main() {
     expect(isForest({'kind': 'park'}), isFalse);
   });
 
-  test('fire grid: forest, the 100 m band around it, and national parks', () {
+  test('fire grid: forest, the 150 m band around it, and national parks', () {
     // 가운데(37.0, 127.0)에서 동쪽 0.005도(약 444 m)부터 숲, 남쪽 끝에 국립공원
     final forest = [
       [(36.99, 127.005), (36.99, 127.03), (37.01, 127.03), (37.01, 127.005), (36.99, 127.005)]
@@ -53,7 +55,8 @@ void main() {
     expect(at(37.0, 127.0), 0); // 숲에서 약 444 m: 가능
     expect(at(37.0, 127.006), 1); // 숲 안
     expect(at(37.0, 127.0045), 1); // 숲에서 약 44 m
-    expect(at(37.0, 127.0035), 0); // 숲에서 약 133 m
+    expect(at(37.0, 127.0035), 1); // 숲에서 약 133 m: 여유(150 m) 안
+    expect(at(37.0, 127.003), 0); // 숲에서 약 178 m
     expect(at(36.9835, 126.995), 2); // 국립공원
     expect(g.rgba().length, 400 * 400 * 4);
   });

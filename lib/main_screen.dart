@@ -362,7 +362,7 @@ class _MainScreenState extends State<MainScreen> {
               },
             ),
           ),
-          // 불 사용 (참고): 숲 100 m·국립공원 기준
+          // 불 사용 (참고): 숲 150 m(법 100 m + 여유)·국립공원 기준
           ValueListenableBuilder<FireStatus?>(
             valueListenable: a.fire,
             builder: (_, f, __) => ListTile(
@@ -377,6 +377,7 @@ class _MainScreenState extends State<MainScreen> {
                   title: const Text('불 사용 (참고)'),
                   content: Text('${f?.summary ?? '아직 계산 전입니다'}\n\n'
                       '• 산림보호법: 숲과 숲에서 100 m 안(산림인접지역)에서는 불을 피우면 안 됩니다 (과태료).\n'
+                      '• 이 앱은 안전하게 여유를 두어 숲에서 150 m 안을 금지로 표시합니다.\n'
                       '• 자연공원법: 국립공원 안에서는 지정된 곳 밖에서 불을 쓰면 안 됩니다.\n\n'
                       '${FireStatus.caution}'),
                   actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('닫기'))],
@@ -628,7 +629,7 @@ class _MainScreenState extends State<MainScreen> {
     final elev = widget.analysis.elevationAt(lat, lon);
     final address = _askAddressData((a) => a.nearest(lat, lon)); // 가장 가까운 도로명주소 (120 m 안)
     final place = _askAddressData((a) => a.nearestPlaceAt(lat, lon)); // 그 자리 건물·가게 이름 (40 m 안)
-    final fire = widget.analysis.fireAt(lat, lon); // 그 자리에서 불을 써도 되는지 (숲 100 m·국립공원)
+    final fire = widget.analysis.fireAt(lat, lon); // 그 자리에서 불을 써도 되는지 (숲 150 m·국립공원)
     widget.map.setPick(lat, lon); // 메뉴가 열려 있는 동안 고른 곳에 빨간 점
     const sub = TextStyle(fontSize: 13, color: Colors.white70);
     showModalBottomSheet<void>(
@@ -957,7 +958,7 @@ class _MainScreenState extends State<MainScreen> {
     widget.map.camera.addListener(_onCameraForFire);
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
       duration: Duration(seconds: 6),
-      content: Text('초록 = 불 사용 가능해 보이는 곳 (숲에서 100 m 밖), 빨강 = 금지 (숲·숲 100 m 안·국립공원)\n'
+      content: Text('초록 = 불 사용 가능해 보이는 곳 (숲에서 150 m 밖), 빨강 = 금지 (숲·숲 150 m 안·국립공원)\n'
           '지도 가운데 둘레 2 km, 지도에 그려진 숲 기준이라 참고용입니다'),
     ));
   }

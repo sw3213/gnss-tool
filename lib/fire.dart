@@ -10,7 +10,8 @@ import 'water.dart' show PmTiles, areasIn, nearestArea;
 // 지도에 그려진 숲만 알 수 있고, 지자체가 따로 정한 금지·건조특보·사유지는 모름 -> 참고용으로만 보여 줌
 // ============================================================
 
-const forestBufferM = 100.0; // 산림인접지역
+const forestLawM = 100.0; // 산림인접지역 (산림보호법)
+const forestBufferM = 150.0; // 앱이 금지로 보는 거리: 법 기준 100 m에 여유 50 m
 
 class FireStatus {
   final double? forestM; // 가장 가까운 숲까지 (m, 숲 안이면 0). 주변 약 2 km 안에 없으면 null
@@ -18,7 +19,7 @@ class FireStatus {
   final String? parkName;
   const FireStatus({this.forestM, this.inPark = false, this.parkName});
 
-  /// 법으로 금지된 곳으로 보임 (국립공원 안, 숲 안이나 숲 100 m 안)
+  /// 금지로 봄 (국립공원 안, 숲 안이나 숲 150 m 안: 법은 100 m지만 안전하게 여유를 둠)
   bool get banned => inPark || (forestM != null && forestM! < forestBufferM);
 
   /// 지도 칩 글씨: "불 금지" / "불 가능"
@@ -30,8 +31,9 @@ class FireStatus {
     if (inPark) return '${parkName ?? '국립공원'} 안: 지정된 곳 밖에서 불 사용 금지 (자연공원법)';
     if (f == null) return '주변 2 km 안에 지도에 그려진 숲 없음: 산림인접지역 밖으로 보임';
     if (f == 0) return '숲 안: 불 피우기 금지 (산림보호법)';
-    if (f < forestBufferM) return '숲까지 ${f.round()} m: 100 m 안이라 불 피우기 금지 (산림보호법)';
-    return '숲까지 ${f.round()} m: 산림인접지역(100 m) 밖으로 보임';
+    if (f < forestLawM) return '숲까지 ${f.round()} m: 100 m 안이라 불 피우기 금지 (산림보호법)';
+    if (f < forestBufferM) return '숲까지 ${f.round()} m: 법 기준(100 m)은 넘지만 안전하게 150 m 안은 피하세요';
+    return '숲까지 ${f.round()} m: 숲에서 150 m 밖 (법 기준 100 m보다 여유)';
   }
 
   /// 주의 사항 (판단은 사용자가)
@@ -59,8 +61,8 @@ FireStatus fireStatus(PmTiles pm, double lat, double lon) {
 
 // ---------------- 불 사용 지도 (주변을 한 번에 칠하기) ----------------
 
-/// 가운데 [lat]/[lon]에서 [halfM] 안을 [cellM] 칸으로 나눠 칸마다 0 가능 / 1 금지(숲 100 m 안) / 2 금지(국립공원).
-/// 숲을 칸에 칠한 뒤 칸 거리(대각선 √2)로 100 m 안을 넓힘 -> 칸 수만큼만 계산해서 빠름
+/// 가운데 [lat]/[lon]에서 [halfM] 안을 [cellM] 칸으로 나눠 칸마다 0 가능 / 1 금지(숲 150 m 안) / 2 금지(국립공원).
+/// 숲을 칸에 칠한 뒤 칸 거리(대각선 √2)로 150 m 안을 넓힘 -> 칸 수만큼만 계산해서 빠름
 class FireGrid {
   final int n; // 한 변 칸 수
   final double north, south, west, east;
