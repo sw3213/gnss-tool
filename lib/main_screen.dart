@@ -23,6 +23,7 @@ import 'shelters.dart';
 import 'updater.dart';
 import 'voice.dart';
 import 'water.dart' show WaterSource, waterChipLabel;
+import 'wind.dart' show windFromLabel;
 import 'weather.dart';
 
 // ============================================================
@@ -544,6 +545,18 @@ class _MainScreenState extends State<MainScreen> {
         ),
       ),
       ValueListenableBuilder<bool>(
+        valueListenable: _windOn,
+        builder: (_, on, __) => labeled(
+          '바람 피할 곳',
+          _RoundButton(
+            tooltip: '바람 피할 곳 (초록 바람 적음 · 빨강 바람 셈)',
+            active: on,
+            onTap: _toggleWindMap,
+            child: const Icon(Icons.air, size: 22),
+          ),
+        ),
+      ),
+      ValueListenableBuilder<bool>(
         valueListenable: widget.map.tilted,
         builder: (_, on, __) => labeled(
           '3D',
@@ -992,6 +1005,130 @@ class _MainScreenState extends State<MainScreen> {
     final c = widget.map.camera.value?.target, f = _fireCenter;
     if (!_fireOn.value || c == null || f == null) return;
     if (distanceM(f.$1, f.$2, c.latitude, c.longitude) > 1200) _drawFireMap();
+  }
+
+  // ---- 🌬 바람 피할 곳: 바람 방향을 고르면 지도 가운데 둘레 2.5 km를 지형으로 칠함 ----
+  final _windOn = ValueNotifier<bool>(false);
+  double? _windFrom; // 바람이 불어오는 방향 (°). 마지막으로 고른 것 (wind_dir.txt)
+  (double, double)? _windCenter;
+  bool _windBusy = false;
+
+  static Future<File> _windFile() async => File('${(await getApplicationSupportDirectory()).path}/wind_dir.txt');
+
+  Future<void> _toggleWindMap() async {
+    if (_windOn.value) {
+      _windOn.value = false;
+      widget.map.camera.removeListener(_onCameraForWind);
+      await widget.map.hideOverlay('wind');
+      return;
+    }
+    if (!widget.analysis.hasDem.value) return _needDem();
+    if (_windFrom == null) {
+      try {
+        final f = await _windFile();
+        if (f.existsSync()) _windFrom = double.tryParse(f.readAsStringSync().trim());
+      } catch (_) {}
+    }
+    final from = await _pickWind();
+    if (from == null || !mounted) return;
+    _windFrom = from;
+    _windFile().then((f) => f.writeAsStringSync('$from')).catchError((Object _) => File(''));
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('바람 피할 곳 계산 중… (몇 초)')));
+    final ok = await _drawWindMap();
+    messenger.hideCurrentSnackBar();
+    if (!ok || !mounted) return;
+    _windOn.value = true;
+    widget.map.camera.addListener(_onCameraForWind);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      duration: const Duration(seconds: 8),
+      content: Text('${windFromLabel(from)} 기준 · 초록 = 지형이 막아 바람 적음, 노랑 = 조금 막힘, 빨강 = 능선처럼 바람 셈, '
+          '파랑 = 계곡 바닥 (바람은 적어도 밤에 춥고 비 오면 물이 불어남)\n'
+          '지형만 본 참고용 (나무·건물 제외)'),
+    ));
+  }
+
+  /// 바람 방향 고르기: 인터넷 날씨(되면) 또는 8방향 중 하나. 취소하면 null
+  Future<double?> _pickWind() {
+    final c = widget.map.camera.value?.target;
+    final online = c == null ? Future.value(null) : TerrainAnalysis.onlineWind(c.latitude, c.longitude);
+    const dirs = [
+      [315.0, 0.0, 45.0],
+      [270.0, -1.0, 90.0],
+      [225.0, 180.0, 135.0],
+    ];
+    return showModalBottomSheet<double>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const ListTile(
+            title: Text('바람이 어디서 불어오나요?', style: TextStyle(fontWeight: FontWeight.bold)),
+            subtitle: Text('얼굴에 바람이 오는 쪽을 고르세요. 나침반 방향 기준'),
+          ),
+          FutureBuilder<(double, double)?>(
+            future: online,
+            builder: (_, w) => ListTile(
+              leading: const Icon(Icons.cloud_outlined),
+              title: Text(w.connectionState != ConnectionState.done
+                  ? '인터넷 날씨 확인 중…'
+                  : w.data == null
+                      ? '인터넷 날씨를 못 받음 (아래에서 고르세요)'
+                      : '지금 ${windFromLabel(w.data!.$1)} ${w.data!.$2.toStringAsFixed(1)} m/s · 이걸로'),
+              enabled: w.data != null,
+              onTap: w.data == null ? null : () => Navigator.pop(ctx, w.data!.$1),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+            child: Column(children: [
+              for (final row in dirs)
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  for (final d in row)
+                    Padding(
+                      padding: const EdgeInsets.all(4),
+                      child: SizedBox(
+                        width: 92,
+                        height: 44,
+                        child: d < 0
+                            ? Icon(Icons.explore_outlined, color: Colors.white38)
+                            : (_windFrom != null && (_windFrom! - d).abs() < 1
+                                ? FilledButton(onPressed: () => Navigator.pop(ctx, d), child: Text(windFromLabel(d)))
+                                : OutlinedButton(
+                                    onPressed: () => Navigator.pop(ctx, d), child: Text(windFromLabel(d)))),
+                      ),
+                    ),
+                ]),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  /// 지도 가운데 둘레를 다시 칠함
+  Future<bool> _drawWindMap() async {
+    final c = widget.map.camera.value?.target, from = _windFrom;
+    if (c == null || from == null || _windBusy) return false;
+    _windBusy = true;
+    try {
+      final img = await widget.analysis.windMapImage(c.latitude, c.longitude, from);
+      if (img == null) return false;
+      final (png, n, s, w, e) = img;
+      await widget.map.showOverlay('wind', png, n, s, w, e);
+      _windCenter = (c.latitude, c.longitude);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      _windBusy = false;
+    }
+  }
+
+  /// 지도를 1.5 km 넘게 옮기면 새 가운데 둘레를 다시 칠함
+  void _onCameraForWind() {
+    final c = widget.map.camera.value?.target, f = _windCenter;
+    if (!_windOn.value || c == null || f == null) return;
+    if (distanceM(f.$1, f.$2, c.latitude, c.longitude) > 1500) _drawWindMap();
   }
 
   /// 👁 가시권: 현재 위치에서 5 km 안 지형에 가려 안 보이는 곳을 어둡게

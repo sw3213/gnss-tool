@@ -3,7 +3,10 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:ui' as ui;
 
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import 'main.dart' show GnssSnapshot;
@@ -12,6 +15,7 @@ import 'offline_map.dart';
 import 'fire.dart';
 import 'terrain.dart';
 import 'water.dart';
+import 'wind.dart';
 
 // ============================================================
 // 현재 위치·방향으로 지형 분석을 계속 갱신: 전방 경사, 지형 일출·일몰, 가장 가까운 수원지, 가시권
@@ -46,6 +50,25 @@ FireGrid _findFireGrid((String, double, double) a) {
   } finally {
     pm.close();
   }
+}
+
+/// 별도 스레드: 바람 피할 곳 지도 (가운데에서 2.5 km 안)
+WindGrid _findWindGrid((String, double, double, double) a) {
+  final dem = DemFile.open(a.$1);
+  try {
+    return windGrid(dem, a.$2, a.$3, a.$4);
+  } finally {
+    dem.close();
+  }
+}
+
+Future<Uint8List?> _png(Uint8List rgba, int n) async {
+  final done = Completer<ui.Image>();
+  ui.decodeImageFromPixels(rgba, n, n, ui.PixelFormat.rgba8888, done.complete);
+  final img = await done.future;
+  final png = await img.toByteData(format: ui.ImageByteFormat.png);
+  img.dispose();
+  return png?.buffer.asUint8List();
 }
 
 class TerrainAnalysis {
@@ -93,7 +116,12 @@ class TerrainAnalysis {
 
   Future<void> setEmergencyWater(bool on) async {
     emergencyWater.value = on;
-    water.value = on ? water.value : [for (final w in water.value) if (!w.emergency) w]; // 끌 때는 바로 빼 줌
+    water.value = on
+        ? water.value
+        : [
+            for (final w in water.value)
+              if (!w.emergency) w
+          ]; // 끌 때는 바로 빼 줌
     _waterFor = null;
     if (_waterBusy) {
       _waterAgain = true;
@@ -147,9 +175,7 @@ class TerrainAnalysis {
   }
 
   bool _stale((double, double, DateTime)? last, double lat, double lon, double meters, Duration age) =>
-      last == null ||
-      distanceM(last.$1, last.$2, lat, lon) > meters ||
-      DateTime.now().difference(last.$3) > age;
+      last == null || distanceM(last.$1, last.$2, lat, lon) > meters || DateTime.now().difference(last.$3) > age;
 
   void _periodic() {
     final p = _pos;
@@ -159,8 +185,7 @@ class TerrainAnalysis {
 
     // 지형 일출·일몰: 1 km 이상 이동했거나 날짜가 바뀌면 다시 계산 (수 ms)
     final dem = _dem;
-    if (dem != null &&
-        (_stale(_sunFor, lat, lon, 1000, const Duration(hours: 6)) || _sunFor!.$3.day != now.day)) {
+    if (dem != null && (_stale(_sunFor, lat, lon, 1000, const Duration(hours: 6)) || _sunFor!.$3.day != now.day)) {
       _sunFor = (lat, lon, now);
       sunToday.value = terrainSun(dem, now, lat, lon);
       _sunTomorrow = terrainSun(dem, now.add(const Duration(days: 1)), lat, lon);
@@ -219,6 +244,30 @@ class TerrainAnalysis {
     return png == null ? null : (png.buffer.asUint8List(), g.north, g.south, g.west, g.east);
   }
 
+  /// 바람 피할 곳 그림. [fromDeg]는 바람이 불어오는 방향. 고도 데이터가 없으면 null
+  Future<(Uint8List, double, double, double, double)?> windMapImage(double lat, double lon, double fromDeg) async {
+    final demPath = _demPath;
+    if (demPath == null) return null;
+    final g = await compute(_findWindGrid, (demPath, lat, lon, fromDeg));
+    final png = await _png(g.rgba(), g.n);
+    return png == null ? null : (png, g.north, g.south, g.west, g.east);
+  }
+
+  /// 인터넷이 되면 지금 바람 (불어오는 방향 °, 풍속 m/s). Open-Meteo 예보, 안 되면 null
+  static Future<(double, double)?> onlineWind(double lat, double lon) async {
+    try {
+      final r = await http
+          .get(Uri.parse('https://api.open-meteo.com/v1/forecast?latitude=${lat.toStringAsFixed(3)}'
+              '&longitude=${lon.toStringAsFixed(3)}&current=wind_speed_10m,wind_direction_10m&wind_speed_unit=ms'))
+          .timeout(const Duration(seconds: 6));
+      if (r.statusCode != 200) return null;
+      final c = (jsonDecode(r.body) as Map<String, dynamic>)['current'] as Map<String, dynamic>;
+      return ((c['wind_direction_10m'] as num).toDouble(), (c['wind_speed_10m'] as num).toDouble());
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 고도 데이터의 지면 고도 (m). 고도 데이터가 없으면 null
   double? elevationAt(double lat, double lon) => _dem?.elevation(lat, lon);
 
@@ -246,7 +295,8 @@ class TerrainAnalysis {
   String? sunDetail() {
     final t = sunToday.value;
     if (t == null) return null;
-    String hm(DateTime? d) => d == null ? '--:--' : '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    String hm(DateTime? d) =>
+        d == null ? '--:--' : '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
     return '산 능선 기준  일출 ${hm(t.rise)} · 일몰 ${hm(t.set)}\n'
         '평지 기준      일출 ${hm(t.astroRise)} · 일몰 ${hm(t.astroSet)}\n'
         '해가 보이는 시간 ${t.daylight == null ? '--' : durationLabel(t.daylight!)}';
